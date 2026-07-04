@@ -344,8 +344,25 @@ npx patch-package @aws-blocks/bb-agent        # writes patches/@aws-blocks+bb-ag
 # add  "postinstall": "patch-package"  to package.json scripts
 ```
 After redeploy, the first message worked: real Claude Sonnet 4.6 (Bedrock, Tokyo) replied
-and correctly reported the tool's cloud stub. **This is an upstream bb-agent bug worth
-filing** (it should pass the region, or omit it and let the SDK resolve `AWS_REGION`).
+and correctly reported the tool's cloud stub.
+
+**Validated against upstream — and already fixed.** This is a known bug, tracked as
+[aws-blocks#120](https://github.com/aws-devtools-labs/aws-blocks/issues/120) and fixed
+by [PR #137](https://github.com/aws-devtools-labs/aws-blocks/pull/137) (merged
+2026-07-03), which makes the **identical change** we did — passing
+`region: process.env.AWS_REGION` to `S3Storage` in `agent.aws.ts`, plus a regression
+test. Reaching that fix by tracing the failure end to end — UI error → CloudWatch → IAM
+→ S3 → dependency source → one line in `agent.aws.js` — rather than guessing, is the
+whole point: a disciplined trace lands on the same answer AWS's own maintainers did.
+
+**Why the patch is still here.** As of this writing the fix is **merged but not yet
+released to npm** (latest `bb-agent` is `0.3.0`, published before the merge), and any
+non-`us-east-1` deploy is broken on the very first message without it. So the committed
+`patches/@aws-blocks+bb-agent+0.3.0.patch` keeps this app running in Tokyo — the
+`postinstall: patch-package` hook re-applies it on every `npm install`, surviving fresh
+clones and CI. **When a fixed version ships, upgrade `bb-agent` and delete the patch**
+(`patch-package` warns when the patched code no longer matches, which is the signal to
+drop it).
 
 **Debugging techniques worth keeping:**
 ```bash

@@ -1,7 +1,10 @@
-# Bug report — `@aws-blocks/bb-agent`: Agent's S3 snapshot storage hardcodes `us-east-1`, breaking every non-`us-east-1` deployment
+# `@aws-blocks/bb-agent`: Agent's S3 snapshot storage hardcodes `us-east-1`, breaking every non-`us-east-1` deployment
 
-> Draft to file against the AWS Blocks issue tracker. Reproduced on a real deploy
-> to `ap-northeast-1`.
+> **Status:** Already tracked upstream as
+> [#120](https://github.com/aws-devtools-labs/aws-blocks/issues/120) and fixed by
+> [PR #137](https://github.com/aws-devtools-labs/aws-blocks/pull/137) (merged
+> 2026-07-03, pending an npm release). Kept here as a detailed technical writeup and
+> the rationale for the committed `patch-package` fix.
 
 ## Summary
 
