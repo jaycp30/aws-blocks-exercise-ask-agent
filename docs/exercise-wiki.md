@@ -422,4 +422,35 @@ ollama pull llama3.1:8b
 
 # Deploy (creates real AWS resources — set region explicitly!)
 AWS_REGION=ap-northeast-1 npm run sandbox    # or: npm run deploy
+
+# Tear everything down when done
+AWS_REGION=<region> npm run destroy          # prod   (or: npm run sandbox:destroy)
+```
+
+### Inspecting & operating the deployed stack
+
+Replace `<stack-name>` and `<region>` with your values — for this project they are
+`ask-aws-agent-stack-prod` and `ap-northeast-1`.
+
+List every resource AWS Blocks deployed, grouped by type (a handful of block
+constructors expands to ~117 CloudFormation resources):
+
+```bash
+aws cloudformation list-stack-resources --stack-name <stack-name> --region <region> \
+  --query "StackResourceSummaries[].ResourceType" --output text \
+  | tr '\t' '\n' | sort | uniq -c | sort -rn
+```
+
+The **invite code** lives encrypted in SSM Parameter Store (a `SecureString` created by
+the secret `AppSetting`) — never in Git or the frontend. You are its source of truth;
+share it only with people you want to grant access. Read or rotate it:
+
+```bash
+# Read the current code
+aws ssm get-parameter --name /ask-aws/invite-code --with-decryption \
+  --region <region> --query "Parameter.Value" --output text
+
+# Rotate it (instant — the Lambda reads SSM per request, no redeploy needed)
+aws ssm put-parameter --name /ask-aws/invite-code --value <new-code> \
+  --type SecureString --overwrite --region <region>
 ```
