@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.hosting/
+cdk.out/
+
+# AWS Blocks generated files
+.blocks/
+.blocks-sandbox/
+.bb-data/
+aws-blocks/client.js
+aws-blocks/blocks.spec.json
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+
+# Local-only: session handoffs and Claude workspace
+handoff_*.md
+.claude/

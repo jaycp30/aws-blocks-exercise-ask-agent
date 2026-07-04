@@ -1,0 +1,14 @@
+diff --git a/node_modules/@aws-blocks/bb-agent/dist/agent.aws.js b/node_modules/@aws-blocks/bb-agent/dist/agent.aws.js
+index 22d2d9c..1948757 100644
+--- a/node_modules/@aws-blocks/bb-agent/dist/agent.aws.js
++++ b/node_modules/@aws-blocks/bb-agent/dist/agent.aws.js
+@@ -5,6 +5,8 @@ import { S3Storage } from '@strands-agents/sdk/session/s3-storage';
+ import { BedrockModels } from './models.js';
+ export class Agent extends AgentBase {
+     constructor(scope, id, config) {
+-        super(scope, id, config, config.model?.deployed ?? BedrockModels.BALANCED, (bucket) => new S3Storage({ bucket: bucket.fullId }));
++        // PATCH: pass the Lambda's region so Strands' S3Storage doesn't default to
++        // us-east-1 (which breaks snapshot reads for buckets in any other region).
++        super(scope, id, config, config.model?.deployed ?? BedrockModels.BALANCED, (bucket) => new S3Storage({ bucket: bucket.fullId, region: process.env.AWS_REGION }));
+     }
+ }
