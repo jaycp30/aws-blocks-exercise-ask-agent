@@ -1,11 +1,12 @@
 /**
  * End-to-end tests — tests the API via direct imports (same typed client the frontend uses).
  *
- * Run:  npm run test:e2e   (set INVITE_CODE to the local invite code first)
+ * Run:  npm run test:e2e
  *
- * Covers the invite-gated auth + agent conversation flow against the local canned
- * model provider (no AWS, no Bedrock). Messages are benign so the canned provider
- * does NOT trigger the searchDocs tool — keeps these tests hermetic and fast.
+ * Covers Cognito-compatible local authentication (including required TOTP setup)
+ * plus the agent conversation flow against the local canned model provider. Messages
+ * are benign so the canned provider does NOT trigger searchDocs; RAG evals live in a
+ * separate deployed/sandbox test suite.
  */
 import { test } from 'node:test';
 import assert from 'node:assert';
@@ -15,13 +16,12 @@ import { randomUUID } from 'node:crypto';
 import { installCookieJar, isServerRunning } from '@aws-blocks/blocks/utils';
 import type { api as ApiType } from 'aws-blocks';
 
-// The invite code seeded into .bb-data/settings.json for local dev. Override via env.
-const INVITE = process.env.INVITE_CODE ?? 'test-invite';
-
 // Unique users per run so the persistent local auth store doesn't cause
 // "already exists" collisions across re-runs.
 const U1 = `u1-${randomUUID()}@example.com`;
 const U2 = `u2-${randomUUID()}@example.com`;
+const U1_INITIAL_PASSWORD = 'TestPass123!';
+const U1_RESET_PASSWORD = 'ChangedPass456!';
 
 // Install cookie jar before importing the API client — Node's fetch doesn't
 // persist cookies between requests, which breaks authenticated API calls.
@@ -29,6 +29,29 @@ installCookieJar();
 
 let server: ChildProcess | null = null;
 let api: typeof ApiType;
+
+async function createAndSignInLocalUser(username: string, password: string) {
+  await api.createLocalTestUser(username, password);
+  const setup = await api.signIn(username, password);
+  assert.strictEqual(setup.status, 'continueSignIn');
+  if (setup.status !== 'continueSignIn') throw new Error('expected required MFA setup');
+  assert.strictEqual(setup.nextStep.name, 'CONTINUE_SIGN_IN_WITH_TOTP_SETUP');
+
+  // AuthCognito mock validates the six-digit shape; real Cognito verifies RFC 6238.
+  const done = await api.confirmSignInCode(setup.nextStep.session, '123456');
+  assert.strictEqual(done.status, 'signedIn');
+  return done;
+}
+
+async function signInExistingLocalUser(username: string, password: string) {
+  const challenge = await api.signIn(username, password);
+  assert.strictEqual(challenge.status, 'continueSignIn');
+  if (challenge.status !== 'continueSignIn') throw new Error('expected TOTP challenge');
+  assert.strictEqual(challenge.nextStep.name, 'CONFIRM_SIGN_IN_WITH_TOTP_CODE');
+  const done = await api.confirmSignInCode(challenge.nextStep.session, '654321');
+  assert.strictEqual(done.status, 'signedIn');
+  return done;
+}
 
 // ─── Setup (don't touch) ─────────────────────────────────────────────────────
 
@@ -66,29 +89,42 @@ test.after(() => {
   }
 });
 
-// ─── Auth (invite-gated) ────────────────────────────────────────────────────────
+// ─── Authentication ──────────────────────────────────────────────────────────
 
 test('auth: starts signed out', async () => {
   assert.strictEqual(await api.me(), null);
 });
 
-test('auth: signup is rejected without a valid invite code', async () => {
-  await assert.rejects(() => api.signUp('wrong-code', 'gate@example.com', 'TestPass123!'));
-  assert.strictEqual(await api.me(), null, 'no account should have been created');
-});
+test('auth: local fixture still requires TOTP before establishing a session', async () => {
+  await api.createLocalTestUser(U1, U1_INITIAL_PASSWORD);
+  const setup = await api.signIn(U1, U1_INITIAL_PASSWORD);
+  assert.strictEqual(setup.status, 'continueSignIn');
+  if (setup.status !== 'continueSignIn') throw new Error('expected MFA setup');
+  assert.strictEqual(setup.nextStep.name, 'CONTINUE_SIGN_IN_WITH_TOTP_SETUP');
+  assert.strictEqual(await api.me(), null, 'MFA must complete before a session exists');
 
-test('auth: signup with the invite code creates the account and signs in', async () => {
-  const res = await api.signUp(INVITE, U1, 'TestPass123!');
-  assert.strictEqual(res.username, U1);
+  const done = await api.confirmSignInCode(setup.nextStep.session, '123456');
+  assert.strictEqual(done.status, 'signedIn');
   const me = await api.me();
   assert.strictEqual(me?.username, U1);
+});
+
+test('auth: emailed reset code changes the password and preserves the TOTP challenge', async () => {
+  await api.signOut();
+  await api.beginPasswordReset(U1);
+  const { code } = await api.getLocalPasswordResetCode(U1);
+  assert.match(code, /^\d{6}$/);
+  await api.confirmPasswordReset(U1, code, U1_RESET_PASSWORD);
+
+  await assert.rejects(() => api.signIn(U1, U1_INITIAL_PASSWORD));
+  await signInExistingLocalUser(U1, U1_RESET_PASSWORD);
 });
 
 test('agent: unauthenticated createConversation is rejected', async () => {
   await api.signOut();
   await assert.rejects(() => api.createConversation());
-  // sign back in for the remaining tests
-  await api.signIn(U1, 'TestPass123!');
+  // Sign back in through the normal post-enrolment TOTP challenge.
+  await signInExistingLocalUser(U1, U1_RESET_PASSWORD);
 });
 
 // ─── Agent conversation flow ───────────────────────────────────────────────────
@@ -126,7 +162,7 @@ test("agent: reads of another user's conversation are rejected", async () => {
 
   // Switch to a different user — they must not see the first user's conversation.
   await api.signOut();
-  await api.signUp(INVITE, U2, 'OtherPass123!');
+  await createAndSignInLocalUser(U2, 'OtherPass123!');
 
   await assert.rejects(() => api.getConversation(conversationId), 'cross-user read must be denied');
 });

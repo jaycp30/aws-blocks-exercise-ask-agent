@@ -1,14 +1,45 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from 'aws-blocks';
 import { useChat, type ChatMessage } from '@aws-blocks/bb-agent/client';
+import { QRCodeSVG } from 'qrcode.react';
 import { applyPersona, COPY, loadTheme, saveTheme, stripPersona, type Theme, type ThemeCopy } from './theme';
 import { clearConversationId, loadConversationId, saveConversationId } from './session';
+import ElectricBorder from './components/ElectricBorder';
+import ScrollFloatItem from './components/ScrollFloatItem';
+import DecryptedText from './components/DecryptedText';
+import LightRays from './components/LightRays';
+
+// Per-theme intensity for the ReactBits effects: fun mode goes full neon, simple mode
+// stays restrained so the same effects still read as professional.
+const EFFECTS: Record<Theme, { border: { color: string; speed: number; chaos: number }; float: 'full' | 'subtle' }> = {
+  fun: { border: { color: '#9b5fe0', speed: 1, chaos: 0.14 }, float: 'full' },
+  simple: { border: { color: '#6366f1', speed: 0.35, chaos: 0.02 }, float: 'subtle' },
+};
 
 // Backend APIs are fully typed — hover over api.* for signatures.
 // Full docs: node_modules/@aws-blocks/blocks/README.md
 
 type User = { username: string };
 type ModelOption = { key: string; label: string };
+type SignInResult = Awaited<ReturnType<typeof api.signIn>>;
+type AuthChallenge = Extract<SignInResult, { status: 'continueSignIn' }>['nextStep'];
+type PasswordResetStage = 'request' | 'confirm';
+
+const TOTP_ISSUER = 'Handover Base Camp';
+
+/** Standard URI understood by Google Authenticator, 1Password, Authy, and similar apps. */
+function totpSetupUri(username: string, sharedSecret: string): string {
+  const account = username.trim().toLowerCase();
+  const label = `${encodeURIComponent(TOTP_ISSUER)}:${encodeURIComponent(account)}`;
+  const params = new URLSearchParams({
+    secret: sharedSecret,
+    issuer: TOTP_ISSUER,
+    algorithm: 'SHA1',
+    digits: '6',
+    period: '30',
+  });
+  return `otpauth://totp/${label}?${params.toString()}`;
+}
 
 /** Cycle through `messages` every 2s while `active`; returns the current one. */
 function useRotatingMessage(messages: string[], active: boolean): string {
@@ -118,42 +149,78 @@ function ChatApp({ model, copy, theme }: { model: string; copy: ThemeCopy; theme
     }
   };
 
-  return (
-    <div className="panel flex flex-col mx-auto w-full max-w-[760px] h-[70vh] p-4">
-      <div className="flex justify-end pb-2 mb-1 border-b border-[var(--border)]">
-        <button
-          onClick={newChat}
-          disabled={loading || messages.length === 0}
-          className="btn-ghost px-3 py-1.5 text-[0.8em] whitespace-nowrap"
-          title="Clear this chat and start a new one"
-        >
-          {copy.newChatLabel}
-        </button>
-      </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto flex flex-col gap-3 px-1 py-2">
-        {messages.length === 0 && (
-          <p className="text-sm text-[var(--text-muted)]">{copy.emptyState}</p>
-        )}
-        {messages.map((m) => (
-          <Bubble key={m.id} message={m} />
-        ))}
-        {loading && <p className="thinking text-sm italic text-[var(--text-muted)]">{thinkingMessage}</p>}
-      </div>
+  const fx = EFFECTS[theme];
 
-      <div className="flex gap-2 pt-3 mt-2 border-t border-[var(--border)]">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && send()}
-          placeholder={copy.inputPlaceholder}
-          disabled={loading}
-          className="field flex-1 px-3 py-2.5 text-[0.95em]"
-        />
-        <button onClick={send} disabled={loading || !input.trim()} className="btn-accent px-4 py-2.5 font-medium whitespace-nowrap">
-          {copy.sendLabel}
-        </button>
+  return (
+    <ElectricBorder
+      color={fx.border.color}
+      speed={fx.border.speed}
+      chaos={fx.border.chaos}
+      borderRadius={16}
+      className="mx-auto w-full max-w-[760px]"
+    >
+      <div className="panel flex h-[clamp(440px,65dvh,720px)] w-full flex-col p-4 sm:h-[clamp(500px,65dvh,760px)]">
+        <div className="flex justify-end pb-2 mb-1 border-b border-[var(--border)]">
+          <button
+            onClick={newChat}
+            disabled={loading || messages.length === 0}
+            className="btn-ghost px-3 py-1.5 text-[0.8em] whitespace-nowrap"
+            title="Clear this chat and start a new one"
+          >
+            {copy.newChatLabel}
+          </button>
+        </div>
+        <div ref={scrollRef} className="flex-1 overflow-y-auto flex flex-col gap-3 px-1 py-2">
+          {messages.length === 0 && (
+            <p className="text-sm text-[var(--text-muted)]">{copy.emptyState}</p>
+          )}
+          {messages.map((m) => (
+            <ScrollFloatItem
+              key={m.id}
+              scrollContainerRef={scrollRef}
+              intensity={fx.float}
+              className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}
+            >
+              <Bubble message={m} />
+            </ScrollFloatItem>
+          ))}
+          {loading && (
+            <p className="thinking text-sm italic text-[var(--text-muted)]">
+              {/* Re-key on the rotating message so each new "thinking" line re-plays the decrypt. */}
+              <DecryptedText
+                key={thinkingMessage}
+                text={thinkingMessage}
+                animateOn="view"
+                sequential
+                speed={theme === 'fun' ? 38 : 26}
+                maxIterations={12}
+                useOriginalCharsOnly={theme === 'simple'}
+                className="text-[var(--text-muted)]"
+                encryptedClassName={
+                  theme === 'fun'
+                    ? 'text-[var(--accent)] opacity-80'
+                    : 'text-[var(--text-muted)] opacity-50'
+                }
+              />
+            </p>
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-3 mt-2 border-t border-[var(--border)]">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && send()}
+            placeholder={copy.inputPlaceholder}
+            disabled={loading}
+            className="field flex-1 px-3 py-2.5 text-[0.95em]"
+          />
+          <button onClick={send} disabled={loading || !input.trim()} className="btn-accent px-4 py-2.5 font-medium whitespace-nowrap">
+            {copy.sendLabel}
+          </button>
+        </div>
       </div>
-    </div>
+    </ElectricBorder>
   );
 }
 
@@ -175,24 +242,105 @@ function errorBubble(text: string): ChatMessage {
   return { id: `err-${Date.now()}`, role: 'assistant', content: `⚠️ ${text}` };
 }
 
-/** Sign in, or sign up with an invite code. No public open signup. */
+/** Cognito sign-in with temporary-password and required-TOTP challenge handling. */
 function AuthGate({ onAuthed, copy }: { onAuthed: (user: User) => void; copy: ThemeCopy }) {
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [invite, setInvite] = useState('');
+  const [challenge, setChallenge] = useState<AuthChallenge | null>(null);
+  const [code, setCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [resetStage, setResetStage] = useState<PasswordResetStage | null>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const submit = async () => {
+  const applyResult = (result: SignInResult) => {
+    if (result.status === 'signedIn') {
+      onAuthed({ username: result.user.username });
+      return;
+    }
+    setChallenge(result.nextStep);
+    setCode('');
+    setNewPassword('');
+  };
+
+  const submitSignIn = async () => {
+    setError('');
+    setNotice('');
+    setBusy(true);
+    try {
+      applyResult(await api.signIn(username.trim(), password));
+      setPassword('');
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Something went wrong';
+      if (/password reset required/i.test(message)) {
+        try {
+          await api.beginPasswordReset(username.trim());
+          setPassword('');
+          setCode('');
+          setNewPassword('');
+          setResetStage('confirm');
+          setNotice('We sent a 6-digit password-reset code to your verified email address.');
+        } catch (resetError) {
+          setError(resetError instanceof Error ? resetError.message : 'Could not start password reset');
+        }
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requestPasswordReset = async () => {
+    setError('');
+    setNotice('');
+    setBusy(true);
+    try {
+      await api.beginPasswordReset(username.trim());
+      setCode('');
+      setNewPassword('');
+      setResetStage('confirm');
+      setNotice('We sent a 6-digit password-reset code to your verified email address.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start password reset');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmPasswordReset = async () => {
+    setError('');
+    setNotice('');
+    setBusy(true);
+    try {
+      await api.confirmPasswordReset(username.trim(), code.trim(), newPassword);
+      setResetStage(null);
+      setCode('');
+      setNewPassword('');
+      setPassword('');
+      setNotice('Password changed. Sign in with your new password.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not reset password');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitChallenge = async () => {
+    if (!challenge) return;
+    if (!('session' in challenge)) {
+      setError('This authentication step is not supported here. Start over and try again.');
+      return;
+    }
     setError('');
     setBusy(true);
     try {
-      const res =
-        mode === 'signin'
-          ? await api.signIn(username.trim(), password)
-          : await api.signUp(invite.trim(), username.trim(), password);
-      onAuthed({ username: res.username });
+      const result =
+        challenge.name === 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED'
+          ? await api.completeNewPassword(challenge.session, newPassword)
+          : await api.confirmSignInCode(challenge.session, code.trim());
+      applyResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong');
     } finally {
@@ -200,22 +348,180 @@ function AuthGate({ onAuthed, copy }: { onAuthed: (user: User) => void; copy: Th
     }
   };
 
+  const startOver = () => {
+    setChallenge(null);
+    setResetStage(null);
+    setCode('');
+    setNewPassword('');
+    setPassword('');
+    setError('');
+    setNotice('');
+  };
+
+  const isNewPassword = challenge?.name === 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED';
+  const isTotpSetup = challenge?.name === 'CONTINUE_SIGN_IN_WITH_TOTP_SETUP';
+
   return (
     <div className="panel max-w-[380px] mx-auto flex flex-col gap-2.5 p-6">
-      <div className="flex gap-2 mb-1">
-        <button onClick={() => setMode('signin')} className={`btn-ghost px-3 py-1.5 ${mode === 'signin' ? 'font-bold' : ''}`}>Sign in</button>
-        <button onClick={() => setMode('signup')} className={`btn-ghost px-3 py-1.5 ${mode === 'signup' ? 'font-bold' : ''}`}>Sign up</button>
-      </div>
-      <input className="field px-3 py-2.5 text-[0.95em] w-full box-border" placeholder="Email" value={username} onChange={(e) => setUsername(e.target.value)} />
-      <input className="field px-3 py-2.5 text-[0.95em] w-full box-border" type="password" placeholder="Password (8+ chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
-      {mode === 'signup' && (
-        <input className="field px-3 py-2.5 text-[0.95em] w-full box-border" placeholder="Invite code" value={invite} onChange={(e) => setInvite(e.target.value)} />
+      <h2 className="text-lg font-semibold m-0">
+        {resetStage
+          ? resetStage === 'request' ? 'Reset your password' : 'Enter your reset code'
+          : challenge
+            ? (isNewPassword ? 'Choose a new password' : isTotpSetup ? 'Secure your account' : 'Authenticator code')
+            : 'Sign in'}
+      </h2>
+
+      {!challenge && !resetStage && (
+        <>
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            type="email"
+            autoComplete="username"
+            placeholder="Email"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            type="password"
+            autoComplete="current-password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && submitSignIn()}
+          />
+          <button onClick={submitSignIn} disabled={busy || !username.trim() || !password} className="btn-accent px-4 py-2.5 font-medium">
+            {busy ? '…' : 'Sign in'}
+          </button>
+          <button onClick={() => { setError(''); setNotice(''); setResetStage('request'); }} disabled={busy} className="btn-ghost px-3 py-1.5">
+            Forgot password?
+          </button>
+        </>
       )}
-      <button onClick={submit} disabled={busy} className="btn-accent px-4 py-2.5 font-medium">
-        {busy ? '…' : mode === 'signin' ? 'Sign in' : 'Create account'}
-      </button>
-      {error && <p className="text-[0.85em] text-red-500 m-0">{error}</p>}
-      {mode === 'signup' && <p className="text-[0.8em] text-[var(--text-muted)] m-0">{copy.authTagline}</p>}
+
+      {resetStage === 'request' && (
+        <>
+          <p className="text-[0.85em] text-[var(--text-muted)] m-0">
+            Enter your account email. Cognito will send a 6-digit verification code.
+          </p>
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            type="email"
+            autoComplete="username"
+            placeholder="Email"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && requestPasswordReset()}
+          />
+          <button onClick={requestPasswordReset} disabled={busy || !username.trim()} className="btn-accent px-4 py-2.5 font-medium">
+            {busy ? '…' : 'Send reset code'}
+          </button>
+        </>
+      )}
+
+      {resetStage === 'confirm' && (
+        <>
+          <p className="text-[0.85em] text-[var(--text-muted)] m-0">
+            Enter the code from your email and choose a password with at least 12 characters, uppercase, lowercase, a number and a symbol.
+          </p>
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            placeholder="6-digit verification code"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          />
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            type="password"
+            autoComplete="new-password"
+            placeholder="New password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && confirmPasswordReset()}
+          />
+          <button onClick={confirmPasswordReset} disabled={busy || code.length !== 6 || newPassword.length < 12} className="btn-accent px-4 py-2.5 font-medium">
+            {busy ? '…' : 'Set new password'}
+          </button>
+          <button onClick={requestPasswordReset} disabled={busy} className="btn-ghost px-3 py-1.5">
+            Send a new code
+          </button>
+        </>
+      )}
+
+      {challenge && !resetStage && isNewPassword && (
+        <>
+          <p className="text-[0.85em] text-[var(--text-muted)] m-0">
+            Your administrator issued a temporary password. Choose a unique password with at least 12 characters, uppercase, lowercase, a number and a symbol.
+          </p>
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            type="password"
+            autoComplete="new-password"
+            placeholder="New password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && submitChallenge()}
+          />
+          <button onClick={submitChallenge} disabled={busy || newPassword.length < 12} className="btn-accent px-4 py-2.5 font-medium">
+            {busy ? '…' : 'Continue'}
+          </button>
+        </>
+      )}
+
+      {challenge && !resetStage && !isNewPassword && (
+        <>
+          {isTotpSetup && (
+            <>
+              <p className="text-[0.85em] text-[var(--text-muted)] m-0">
+                Scan this QR code with your authenticator app, then enter its current 6-digit code.
+              </p>
+              <div className="self-center rounded-xl bg-white p-3" aria-label="Authenticator setup QR code">
+                <QRCodeSVG
+                  value={totpSetupUri(username, challenge.sharedSecret)}
+                  size={196}
+                  level="M"
+                  marginSize={2}
+                  title={`Set up ${TOTP_ISSUER} in an authenticator app`}
+                />
+              </div>
+              <details className="text-[0.8em] text-[var(--text-muted)]">
+                <summary className="cursor-pointer select-none">Can't scan? Use the setup key</summary>
+                <code className="field block mt-2 px-3 py-2.5 text-sm break-all select-all">
+                  {challenge.sharedSecret}
+                </code>
+              </details>
+            </>
+          )}
+          {!isTotpSetup && (
+            <p className="text-[0.85em] text-[var(--text-muted)] m-0">
+              Enter the current 6-digit code from your authenticator app.
+            </p>
+          )}
+          <input
+            className="field px-3 py-2.5 text-[0.95em] w-full box-border"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            placeholder="6-digit code"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            onKeyDown={(e) => e.key === 'Enter' && submitChallenge()}
+          />
+          <button onClick={submitChallenge} disabled={busy || code.length !== 6} className="btn-accent px-4 py-2.5 font-medium">
+            {busy ? '…' : isTotpSetup ? 'Enable MFA and sign in' : 'Verify'}
+          </button>
+        </>
+      )}
+
+      {notice && <p className="text-[0.85em] text-emerald-600 m-0" role="status">{notice}</p>}
+      {error && <p className="text-[0.85em] text-red-500 m-0" role="alert">{error}</p>}
+      {(challenge || resetStage) && <button onClick={startOver} disabled={busy} className="btn-ghost px-3 py-1.5">Back to sign in</button>}
+      <p className="text-[0.8em] text-[var(--text-muted)] m-0">{copy.authTagline}</p>
     </div>
   );
 }
@@ -265,14 +571,45 @@ export function App() {
   const toggleTheme = () => setTheme((t) => (t === 'fun' ? 'simple' : 'fun'));
 
   return (
-    <div className="app-root" data-theme={theme}>
-      <div className="p-4 sm:p-6 max-w-[900px] mx-auto">
-        <div className="flex flex-wrap justify-between items-start gap-4 mb-5">
-          <div className="min-w-0">
-            <h1 className="neon-title text-xl sm:text-2xl font-bold mb-1">{copy.title}</h1>
-            <p className="text-[0.9em] text-[var(--text-muted)] m-0 max-w-[560px]">{copy.subtitle}</p>
+    <div className="app-root relative" data-theme={theme}>
+      {/* Fun-only: WebGL light rays streaming down behind everything. Light Rays is an
+          additive light-on-dark effect, so it only renders on the dark fun theme; the
+          simple theme keeps its clean white background. Fixed + pointer-events-none so it
+          never intercepts clicks or scrolls with the content. */}
+      {theme === 'fun' && (
+        <div className="fixed inset-0 z-0 pointer-events-none">
+          <LightRays
+            raysOrigin="top-center"
+            raysColor="#9b5fe0"
+            raysSpeed={0.9}
+            lightSpread={0.85}
+            rayLength={1.6}
+            followMouse
+            mouseInfluence={0.1}
+            fadeDistance={1.1}
+            className="opacity-70"
+          />
+        </div>
+      )}
+      <div className="relative z-[1] p-4 sm:p-6 max-w-[900px] mx-auto">
+        <header className="mb-5">
+          <div className="flex flex-col items-start gap-4 sm:flex-row sm:justify-between">
+            <div className="min-w-0">
+              <h1 className="neon-title text-xl sm:text-2xl font-bold mb-1">{copy.title}</h1>
+              <p className="text-[0.9em] text-[var(--text-muted)] m-0 max-w-[560px]">{copy.subtitle}</p>
+            </div>
+            {user && (
+              <button
+                onClick={signOut}
+                className="btn-ghost shrink-0 self-end px-3 py-2 whitespace-nowrap text-[0.85em] sm:self-auto"
+                title="Sign out of this account"
+              >
+                Sign out
+              </button>
+            )}
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2.5">
+
+          <div className="mt-4 flex flex-wrap items-end justify-end gap-2.5">
             <button
               onClick={toggleTheme}
               className="btn-ghost px-3 py-2 text-[1.15em] leading-none"
@@ -282,7 +619,7 @@ export function App() {
               {theme === 'fun' ? '⛩️' : '🌤️'}
             </button>
             {user && models.length > 0 && model && (
-              <label className="flex flex-col text-[0.7em] text-[var(--text-muted)] gap-1">
+              <label className="flex min-w-[200px] flex-col gap-1 text-[0.7em] text-[var(--text-muted)]">
                 {copy.modelLabel}
                 <select
                   value={model}
@@ -296,13 +633,8 @@ export function App() {
                 </select>
               </label>
             )}
-            {user && (
-              <button onClick={signOut} className="btn-ghost px-3 py-2 whitespace-nowrap text-[0.85em]">
-                Sign out ({user.username})
-              </button>
-            )}
           </div>
-        </div>
+        </header>
 
         {loading ? (
           <p className="text-[var(--text-muted)]">Loading…</p>

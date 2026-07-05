@@ -10,15 +10,15 @@
  *     chunk -> embed (Titan) -> S3 Vectors. Local dev uses TF-IDF (free, no Bedrock).
  *   - `Agent` block (bb-agent) with a `searchDocs` tool that calls kb.retrieve();
  *     Claude answers from the retrieved passages and cites the source document.
- *   - `AuthBasic` + an invite-code gate scope access to invited teammates.
+ *   - `AuthCognito` scopes access to administrator-created users and requires
+ *     TOTP MFA before any document or conversation API can be used.
  */
 import {
   ApiNamespace,
   Scope,
-  AuthBasic,
+  AuthCognito,
   Agent,
   OllamaModels,
-  AppSetting,
   KnowledgeBase,
 } from '@aws-blocks/blocks';
 import { z } from 'zod';
@@ -26,19 +26,40 @@ import { z } from 'zod';
 const scope = new Scope('ask-aws');
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
-const auth = new AuthBasic(scope, 'auth', {
-  passwordPolicy: { minLength: 8 },
+// Production accounts are created by an administrator in Cognito. There is no
+// browser sign-up endpoint or shared invite code. TOTP is the only second factor,
+// avoiding SMS cost/SIM-swap exposure and SES configuration for email MFA.
+//
+// Retain the pool and session table if the stack is deleted accidentally. This is
+// deliberately different from the temporary RAG document bucket below.
+const localAuthCodes = new Map<string, string>();
+const auth = new AuthCognito(scope, 'auth', {
+  selfSignUp: false,
+  signInWith: 'email',
+  mfa: 'required',
+  mfaTypes: ['TOTP'],
+  passwordPolicy: {
+    minLength: 12,
+    requireUppercase: true,
+    requireLowercase: true,
+    requireDigits: true,
+    requireSymbols: true,
+  },
+  authFlowType: 'USER_PASSWORD_AUTH',
+  featurePlan: 'essentials',
+  sessionTtlSeconds: 8 * 60 * 60,
+  removalPolicy: 'retain',
   crossDomain: process.env.BLOCKS_SANDBOX === 'true',
+  // Mock-only delivery hook. NODE_ENV is explicitly "production" in the
+  // deployed Lambda, so verification codes are never captured in AWS.
+  ...(process.env.NODE_ENV !== 'production'
+    ? {
+        codeDelivery: async (username: string, code: string, purpose: string) => {
+          localAuthCodes.set(`${purpose}:${username}`, code);
+        },
+      }
+    : {}),
 });
-// Secret invite code that gates signup — set out-of-band (SSM SecureString in prod,
-// .bb-data/settings.json locally), never committed. Only invited teammates can sign up.
-const inviteCode = new AppSetting(scope, 'invite-code', {
-  name: '/ask-aws/invite-code',
-  secret: true,
-});
-
-// NOTE: we deliberately do NOT expose auth.createApi() (the raw public signup
-// endpoint). Auth is routed through the gated `api` methods below instead.
 
 // ─── Knowledge base (RAG source) ──────────────────────────────────────────────
 // Indexes everything in ./knowledge. Local dev scores with TF-IDF (free); on AWS it
@@ -153,22 +174,68 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   },
 
   async signIn(username: string, password: string) {
-    const user = await auth.signIn(username, password, context);
-    return { username: user.username };
+    return auth.signIn(username.trim().toLowerCase(), password, context);
   },
 
-  async signOut() {
-    await auth.signOut(context);
+  /** Continue a TOTP enrolment or normal TOTP challenge. */
+  async confirmSignInCode(session: string, code: string) {
+    if (!/^\d{6}$/.test(code)) throw new Error('Enter the 6-digit authenticator code');
+    return auth.confirmSignIn(session, { code }, context, {
+      friendlyDeviceName: 'Handover Base Camp',
+    });
+  },
+
+  /** Complete the first-login temporary-password challenge for admin-created users. */
+  async completeNewPassword(session: string, newPassword: string) {
+    return auth.confirmSignIn(session, { newPassword }, context);
+  },
+
+  /** Email a password-reset code. Cognito deliberately does not reveal unknown users. */
+  async beginPasswordReset(username: string) {
+    const normalized = username.trim().toLowerCase();
+    if (!normalized) throw new Error('Enter your email address');
+    await auth.resetPassword(normalized);
     return { ok: true };
   },
 
-  /** Create an account — only if the invite code matches. Then sign in. */
-  async signUp(invite: string, username: string, password: string) {
-    const expected = await inviteCode.get();
-    if (!invite || invite !== expected) throw new Error('Invalid invite code');
-    await auth.signUp(username, password);
-    const user = await auth.signIn(username, password, context);
-    return { username: user.username };
+  /** Complete the reset using the code delivered by Cognito. TOTP remains enabled. */
+  async confirmPasswordReset(username: string, code: string, newPassword: string) {
+    const normalized = username.trim().toLowerCase();
+    if (!/^\d{6}$/.test(code)) throw new Error('Enter the 6-digit verification code');
+    if (newPassword.length < 12) throw new Error('Password must be at least 12 characters');
+    await auth.confirmResetPassword(normalized, code, newPassword);
+    localAuthCodes.delete(`resetPassword:${normalized}`);
+    return { ok: true };
+  },
+
+  async signOut() {
+    // Revoke the Cognito refresh token as well as clearing the browser cookie.
+    await auth.signOut(context, { global: true });
+    return { ok: true };
+  },
+
+  /**
+   * Local test fixture only. Production has NODE_ENV=production and Cognito
+   * self-sign-up disabled, so this path cannot create a deployed account.
+   */
+  async createLocalTestUser(username: string, password: string) {
+    if (process.env.NODE_ENV === 'production') throw new Error('Not found');
+    const normalized = username.trim().toLowerCase();
+    await auth.signUp(normalized, password);
+    const code = localAuthCodes.get(`signUp:${normalized}`);
+    if (!code) throw new Error('Local confirmation code was not captured');
+    await auth.confirmSignUp(normalized, code);
+    localAuthCodes.delete(`signUp:${normalized}`);
+    return { username: normalized };
+  },
+
+  /** Read a mock delivery code in E2E tests; unavailable in the deployed Lambda. */
+  async getLocalPasswordResetCode(username: string) {
+    if (process.env.NODE_ENV === 'production') throw new Error('Not found');
+    const normalized = username.trim().toLowerCase();
+    const code = localAuthCodes.get(`resetPassword:${normalized}`);
+    if (!code) throw new Error('Local password-reset code was not captured');
+    return { code };
   },
 
   // ─── Models ────────────────────────────────────────────────────────────────

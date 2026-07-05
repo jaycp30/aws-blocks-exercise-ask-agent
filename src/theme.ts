@@ -76,7 +76,7 @@ export const COPY: Record<Theme, ThemeCopy> = {
       '🚄 Catching the Shinkansen to that section…',
       '🏮 Following the trail markers…',
     ],
-    authTagline: 'Grab your invite and hit the trail. 🏔️',
+    authTagline: 'Team access only — account and authenticator required. 🔐',
   },
   simple: {
     title: 'Ask my handover docs',
@@ -90,6 +90,6 @@ export const COPY: Record<Theme, ThemeCopy> = {
     modelLabel: 'Model',
     modelHint: 'Switching model starts a new chat',
     thinking: ['Thinking…'],
-    authTagline: 'Sign-up requires an invite code.',
+    authTagline: 'Accounts are created by the administrator. MFA is required.',
   },
 };
