@@ -28,3 +28,8 @@ npm-debug.log*
 # Local-only: session handoffs and Claude workspace
 handoff_*.md
 .claude/
+
+# Personal knowledge docs — repo is public, keep real docs out.
+# Only the sample doc is tracked so the app works out of the box.
+knowledge/*
+!knowledge/SAMPLE-handover.md

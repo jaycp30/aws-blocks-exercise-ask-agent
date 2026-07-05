@@ -5,7 +5,7 @@
  *
  * Covers the invite-gated auth + agent conversation flow against the local canned
  * model provider (no AWS, no Bedrock). Messages are benign so the canned provider
- * does NOT trigger the runAwsRead tool — keeps these tests hermetic and fast.
+ * does NOT trigger the searchDocs tool — keeps these tests hermetic and fast.
  */
 import { test } from 'node:test';
 import assert from 'node:assert';

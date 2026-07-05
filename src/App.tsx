@@ -1,17 +1,46 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from 'aws-blocks';
 import { useChat, type ChatMessage } from '@aws-blocks/bb-agent/client';
+import { applyPersona, COPY, loadTheme, saveTheme, stripPersona, type Theme, type ThemeCopy } from './theme';
+import { clearConversationId, loadConversationId, saveConversationId } from './session';
 
 // Backend APIs are fully typed — hover over api.* for signatures.
 // Full docs: node_modules/@aws-blocks/blocks/README.md
 
 type User = { username: string };
+type ModelOption = { key: string; label: string };
 
-function ChatApp() {
+/** Cycle through `messages` every 2s while `active`; returns the current one. */
+function useRotatingMessage(messages: string[], active: boolean): string {
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    if (!active) {
+      setIndex(0);
+      return;
+    }
+    if (messages.length <= 1) return;
+    const id = setInterval(() => setIndex((n) => (n + 1) % messages.length), 2000);
+    return () => clearInterval(id);
+  }, [active, messages.length]);
+
+  return messages[index] ?? messages[0] ?? '';
+}
+
+// `model` is fixed for the lifetime of a ChatApp instance: App keys <ChatApp> by model,
+// so switching models remounts this component with a fresh conversation. That matches the
+// backend, where each model is a separate agent with its own storage and Realtime channel.
+function ChatApp({ model, copy, theme }: { model: string; copy: ThemeCopy; theme: Theme }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const thinkingMessage = useRotatingMessage(copy.thinking, loading);
+
+  // Hold the live theme in a ref so the send closure below (created once) reads the
+  // CURRENT persona — this is what lets toggling the theme change tone mid-conversation.
+  const personaRef = useRef<Theme>(theme);
+  personaRef.current = theme;
 
   // useChat is a factory, NOT a React hook — create it exactly once.
   // It owns the subscribe-before-send ordering and channel lifecycle.
@@ -19,15 +48,26 @@ function ChatApp() {
   if (!chatRef.current) {
     chatRef.current = useChat({
       api: {
+        // Pass the selected model on every call — storage + channel are per-agent.
+        // In fun mode, prepend the persona marker so the agent answers in-character.
         sendMessage: async (convId, msg, chId) => {
-          await api.sendMessage(convId, msg, chId);
+          await api.sendMessage(convId, applyPersona(msg, personaRef.current), chId, model);
         },
-        createConversation: () => api.createConversation(),
-        getConversation: (id) => api.getConversation(id),
+        createConversation: () => api.createConversation(model),
+        // Strip the persona marker from stored user messages so it never shows on reload.
+        getConversation: async (id) => {
+          const res = await api.getConversation(id, model);
+          return {
+            ...res,
+            messages: res.messages.map((m) =>
+              m.role === 'user' ? { ...m, content: stripPersona(m.content) } : m,
+            ),
+          };
+        },
       },
       // Subscribe to the Realtime (WebSocket) channel the agent streams chunks on.
       subscribe: async (channelId, handler) => {
-        const channel = await api.getChannel(channelId);
+        const channel = await api.getChannel(channelId, model);
         return channel.subscribe(handler);
       },
       onMessagesChange: setMessages,
@@ -42,41 +82,75 @@ function ChatApp() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  // On mount (i.e. per model), resume the last conversation for this model if we saved
+  // one; otherwise the first send lazily creates a fresh one. Tear down the subscription
+  // on unmount (e.g. when switching models remounts this component).
+  useEffect(() => {
+    const saved = loadConversationId(model);
+    if (saved) {
+      chat.loadConversation(saved).catch(() => clearConversationId(model));
+    }
+    return () => chat.destroy();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const send = async () => {
     const text = input.trim();
     if (!text || loading) return;
     setInput('');
     await chat.sendMessage(text);
+    // Persist the (possibly just-created) conversation id so a reload resumes it.
+    const id = chat.getConversationId();
+    if (id) saveConversationId(model, id);
+  };
+
+  // Start a fresh conversation: open a new one, then delete the old thread server-side
+  // so abandoned chats don't accumulate. Best-effort delete — a failure won't block.
+  const newChat = async () => {
+    if (loading) return;
+    const previous = chat.getConversationId();
+    setMessages([]);
+    const { conversationId } = await api.createConversation(model);
+    await chat.loadConversation(conversationId);
+    saveConversationId(model, conversationId);
+    if (previous && previous !== conversationId) {
+      await api.deleteConversation(previous, model).catch(() => undefined);
+    }
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '70vh', maxWidth: 760, margin: '0 auto' }}>
-      <div
-        ref={scrollRef}
-        style={{ flex: 1, overflowY: 'auto', padding: '8px 4px', display: 'flex', flexDirection: 'column', gap: 12 }}
-      >
+    <div className="panel flex flex-col mx-auto w-full max-w-[760px] h-[70vh] p-4">
+      <div className="flex justify-end pb-2 mb-1 border-b border-[var(--border)]">
+        <button
+          onClick={newChat}
+          disabled={loading || messages.length === 0}
+          className="btn-ghost px-3 py-1.5 text-[0.8em] whitespace-nowrap"
+          title="Clear this chat and start a new one"
+        >
+          {copy.newChatLabel}
+        </button>
+      </div>
+      <div ref={scrollRef} className="flex-1 overflow-y-auto flex flex-col gap-3 px-1 py-2">
         {messages.length === 0 && (
-          <p style={{ color: '#888', fontSize: '0.9em' }}>
-            Ask about your AWS account — e.g. “list my S3 buckets” or “what EC2 instances are running in Tokyo?”
-          </p>
+          <p className="text-sm text-[var(--text-muted)]">{copy.emptyState}</p>
         )}
         {messages.map((m) => (
           <Bubble key={m.id} message={m} />
         ))}
-        {loading && <p style={{ color: '#888', fontSize: '0.85em', fontStyle: 'italic' }}>Thinking…</p>}
+        {loading && <p className="thinking text-sm italic text-[var(--text-muted)]">{thinkingMessage}</p>}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, paddingTop: 12, borderTop: '1px solid #eee' }}>
+      <div className="flex gap-2 pt-3 mt-2 border-t border-[var(--border)]">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
-          placeholder="Ask your AWS account…"
+          placeholder={copy.inputPlaceholder}
           disabled={loading}
-          style={{ flex: 1, padding: 10, fontSize: '0.95em' }}
+          className="field flex-1 px-3 py-2.5 text-[0.95em]"
         />
-        <button onClick={send} disabled={loading || !input.trim()} style={{ padding: '10px 18px' }}>
-          Send
+        <button onClick={send} disabled={loading || !input.trim()} className="btn-accent px-4 py-2.5 font-medium whitespace-nowrap">
+          {copy.sendLabel}
         </button>
       </div>
     </div>
@@ -87,16 +161,10 @@ function Bubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
   return (
     <div
-      style={{
-        alignSelf: isUser ? 'flex-end' : 'flex-start',
-        maxWidth: '85%',
-        padding: '10px 14px',
-        borderRadius: 12,
-        background: isUser ? '#2563eb' : '#f3f4f6',
-        color: isUser ? '#fff' : '#111',
-        whiteSpace: 'pre-wrap',
-        lineHeight: 1.5,
-      }}
+      className={[
+        isUser ? 'bubble-user self-end' : 'bubble-bot self-start',
+        'max-w-[85%] px-3.5 py-2.5 rounded-xl whitespace-pre-wrap leading-relaxed',
+      ].join(' ')}
     >
       {message.content}
     </div>
@@ -108,7 +176,7 @@ function errorBubble(text: string): ChatMessage {
 }
 
 /** Sign in, or sign up with an invite code. No public open signup. */
-function AuthGate({ onAuthed }: { onAuthed: (user: User) => void }) {
+function AuthGate({ onAuthed, copy }: { onAuthed: (user: User) => void; copy: ThemeCopy }) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -132,26 +200,22 @@ function AuthGate({ onAuthed }: { onAuthed: (user: User) => void }) {
     }
   };
 
-  const inputStyle = { padding: 10, fontSize: '0.95em', width: '100%', boxSizing: 'border-box' as const };
-
   return (
-    <div style={{ maxWidth: 360, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-        <button onClick={() => setMode('signin')} style={{ fontWeight: mode === 'signin' ? 700 : 400 }}>Sign in</button>
-        <button onClick={() => setMode('signup')} style={{ fontWeight: mode === 'signup' ? 700 : 400 }}>Sign up</button>
+    <div className="panel max-w-[380px] mx-auto flex flex-col gap-2.5 p-6">
+      <div className="flex gap-2 mb-1">
+        <button onClick={() => setMode('signin')} className={`btn-ghost px-3 py-1.5 ${mode === 'signin' ? 'font-bold' : ''}`}>Sign in</button>
+        <button onClick={() => setMode('signup')} className={`btn-ghost px-3 py-1.5 ${mode === 'signup' ? 'font-bold' : ''}`}>Sign up</button>
       </div>
-      <input style={inputStyle} placeholder="Email" value={username} onChange={(e) => setUsername(e.target.value)} />
-      <input style={inputStyle} type="password" placeholder="Password (8+ chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
+      <input className="field px-3 py-2.5 text-[0.95em] w-full box-border" placeholder="Email" value={username} onChange={(e) => setUsername(e.target.value)} />
+      <input className="field px-3 py-2.5 text-[0.95em] w-full box-border" type="password" placeholder="Password (8+ chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
       {mode === 'signup' && (
-        <input style={inputStyle} placeholder="Invite code" value={invite} onChange={(e) => setInvite(e.target.value)} />
+        <input className="field px-3 py-2.5 text-[0.95em] w-full box-border" placeholder="Invite code" value={invite} onChange={(e) => setInvite(e.target.value)} />
       )}
-      <button onClick={submit} disabled={busy} style={{ padding: '10px 18px' }}>
+      <button onClick={submit} disabled={busy} className="btn-accent px-4 py-2.5 font-medium">
         {busy ? '…' : mode === 'signin' ? 'Sign in' : 'Create account'}
       </button>
-      {error && <p style={{ color: '#b91c1c', fontSize: '0.85em', margin: 0 }}>{error}</p>}
-      {mode === 'signup' && (
-        <p style={{ color: '#888', fontSize: '0.8em', margin: 0 }}>Sign-up requires an invite code.</p>
-      )}
+      {error && <p className="text-[0.85em] text-red-500 m-0">{error}</p>}
+      {mode === 'signup' && <p className="text-[0.8em] text-[var(--text-muted)] m-0">{copy.authTagline}</p>}
     </div>
   );
 }
@@ -159,6 +223,15 @@ function AuthGate({ onAuthed }: { onAuthed: (user: User) => void }) {
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [model, setModel] = useState<string>('');
+  const [theme, setTheme] = useState<Theme>(loadTheme);
+  const copy = COPY[theme];
+
+  // Persist theme whenever it changes so a teammate's pick survives a refresh.
+  useEffect(() => {
+    saveTheme(theme);
+  }, [theme]);
 
   // Resolve the current session on load.
   useEffect(() => {
@@ -169,27 +242,78 @@ export function App() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Load the selectable models once the user is signed in (listModels requires auth).
+  useEffect(() => {
+    if (!user) {
+      setModels([]);
+      return;
+    }
+    api
+      .listModels()
+      .then((res) => {
+        setModels(res.models);
+        setModel((cur) => cur || res.defaultModel);
+      })
+      .catch(() => setModels([]));
+  }, [user]);
+
   const signOut = async () => {
     await api.signOut();
     setUser(null);
   };
 
+  const toggleTheme = () => setTheme((t) => (t === 'fun' ? 'simple' : 'fun'));
+
   return (
-    <div style={{ padding: 24, fontFamily: 'system-ui, sans-serif' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ marginBottom: 4 }}>Ask my AWS account</h1>
-          <p style={{ color: '#666', fontSize: '0.9em', margin: 0 }}>
-            Read-only assistant for ap-northeast-1 (Tokyo). It can inspect resources, costs, and config — it cannot change anything.
-          </p>
+    <div className="app-root" data-theme={theme}>
+      <div className="p-4 sm:p-6 max-w-[900px] mx-auto">
+        <div className="flex flex-wrap justify-between items-start gap-4 mb-5">
+          <div className="min-w-0">
+            <h1 className="neon-title text-xl sm:text-2xl font-bold mb-1">{copy.title}</h1>
+            <p className="text-[0.9em] text-[var(--text-muted)] m-0 max-w-[560px]">{copy.subtitle}</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2.5">
+            <button
+              onClick={toggleTheme}
+              className="btn-ghost px-3 py-2 text-[1.15em] leading-none"
+              aria-label={theme === 'fun' ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={theme === 'fun' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'fun' ? '⛩️' : '🌤️'}
+            </button>
+            {user && models.length > 0 && model && (
+              <label className="flex flex-col text-[0.7em] text-[var(--text-muted)] gap-1">
+                {copy.modelLabel}
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="field px-2 py-1.5 text-[0.9em]"
+                  title={copy.modelHint}
+                >
+                  {models.map((m) => (
+                    <option key={m.key} value={m.key}>{m.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {user && (
+              <button onClick={signOut} className="btn-ghost px-3 py-2 whitespace-nowrap text-[0.85em]">
+                Sign out ({user.username})
+              </button>
+            )}
+          </div>
         </div>
-        {user && (
-          <button onClick={signOut} style={{ padding: '8px 14px', whiteSpace: 'nowrap' }}>
-            Sign out ({user.username})
-          </button>
+
+        {loading ? (
+          <p className="text-[var(--text-muted)]">Loading…</p>
+        ) : user ? (
+          // Key by model: changing the selection remounts ChatApp with a fresh conversation
+          // on the newly chosen agent. Wait for a resolved model so the first mount is correct.
+          model ? <ChatApp key={model} model={model} copy={copy} theme={theme} /> : <p className="text-[var(--text-muted)]">Loading…</p>
+        ) : (
+          <AuthGate onAuthed={setUser} copy={copy} />
         )}
       </div>
-      {loading ? <p style={{ color: '#888' }}>Loading…</p> : user ? <ChatApp /> : <AuthGate onAuthed={setUser} />}
     </div>
   );
 }

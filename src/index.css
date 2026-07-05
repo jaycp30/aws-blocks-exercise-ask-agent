@@ -1,0 +1,162 @@
+@import 'tailwindcss';
+
+/*
+ * Theme system — one set of Tailwind utilities, two looks.
+ *
+ * Every component styles itself with CSS custom properties (e.g. bg-[var(--surface)]),
+ * and the palette is swapped by the `data-theme` attribute on the app root. That keeps
+ * the JSX identical across themes: only these variables change, plus a few fun-only
+ * decorations gated on [data-theme='fun'].
+ *
+ * Palette: Nox Amethyst — near-black base, neon purple accent, silver text.
+ */
+
+/* ─── Simple: clean, light, restrained (the "give me the plain one" mode) ─────── */
+[data-theme='simple'] {
+  --bg: #ffffff;
+  --bg-accent: transparent;
+  --surface: #ffffff;
+  --surface-2: #f3f4f6;
+  --text: #111111;
+  --text-muted: #6b7280;
+  --accent: #4f46e5;
+  --accent-strong: #4338ca;
+  --on-accent: #ffffff;
+  --border: #e5e7eb;
+  --user-bubble: #2563eb;
+  --user-text: #ffffff;
+  --glow: none;
+  --font-display: system-ui, sans-serif;
+}
+
+/* ─── Fun: Tokyo-night futuristic, neon purple on near-black ──────────────────── */
+[data-theme='fun'] {
+  --bg: #141414;
+  --bg-accent: #7e49b3;
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-2: rgba(126, 73, 179, 0.14);
+  --text: #ededed;
+  --text-muted: #9a9aa5;
+  --accent: #9b5fe0;
+  --accent-strong: #7e49b3;
+  --on-accent: #ffffff;
+  --border: rgba(126, 73, 179, 0.4);
+  --user-bubble: linear-gradient(135deg, #7e49b3, #9b5fe0);
+  --user-text: #ffffff;
+  --glow: 0 0 18px rgba(126, 73, 179, 0.55);
+  --font-display: 'Segoe UI', system-ui, sans-serif;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+/* App root fills the viewport and paints the theme background. */
+.app-root {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-display);
+  transition: background 0.4s ease, color 0.4s ease;
+}
+
+/* Fun-only: a soft Tokyo-neon glow bleeding up from the horizon + slow drift. */
+[data-theme='fun'] .app-root {
+  background:
+    radial-gradient(120% 90% at 50% 120%, rgba(126, 73, 179, 0.28), transparent 60%),
+    radial-gradient(90% 60% at 85% -10%, rgba(155, 95, 224, 0.16), transparent 55%),
+    #141414;
+  background-attachment: fixed;
+}
+
+/* Glassy panel used for chat + auth in fun mode; flat/clean in simple mode. */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--glow);
+}
+[data-theme='simple'] .panel {
+  border-radius: 12px;
+}
+[data-theme='fun'] .panel {
+  backdrop-filter: blur(8px);
+}
+
+/* Neon focus ring in fun mode; subtle in simple. */
+.field {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.field::placeholder {
+  color: var(--text-muted);
+}
+.field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Primary action button. */
+.btn-accent {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+.btn-accent:hover:not(:disabled) {
+  background: var(--accent-strong);
+  box-shadow: var(--glow);
+  transform: translateY(-1px);
+}
+.btn-accent:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Ghost/secondary button (sign out, tab switch). */
+.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.btn-ghost:hover {
+  border-color: var(--accent);
+}
+
+/* Bubbles. */
+.bubble-user {
+  background: var(--user-bubble);
+  color: var(--user-text);
+}
+.bubble-bot {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* Fun-only: gently pulsing "thinking" glow so the wait feels alive. */
+@keyframes trailPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+[data-theme='fun'] .thinking {
+  animation: trailPulse 1.4s ease-in-out infinite;
+  color: var(--accent);
+}
+
+/* Fun-only: the title gets a soft neon text-glow. */
+[data-theme='fun'] .neon-title {
+  text-shadow: 0 0 22px rgba(155, 95, 224, 0.55);
+}

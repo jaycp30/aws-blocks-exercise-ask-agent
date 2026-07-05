@@ -1,24 +1,27 @@
 /**
  * Backend — aws-blocks/index.ts
  *
- * A read-only "ask my AWS account" chat agent built on AWS Blocks.
+ * "Ask my handover docs" — a RAG (retrieval-augmented generation) chat agent that
+ * answers questions about a set of documents, so a team can self-serve while a
+ * colleague is away.
  *
- * Architecture (Plan B — see understanding.md):
- *   - `Agent` block (bb-agent) provides streaming, conversation persistence
- *     (DynamoDB, automatic), and tool calling. Powered by Strands.
- *   - One tool, `runAwsRead`, wraps the AWS API MCP server's `call_aws`. The
- *     model proposes an AWS read command; the handler runs it via MCP and hands
- *     the output back for the agent to summarize.
- *   - `AuthBasic` scopes conversations per user.
- *
- * Guardrails (defense in depth, not prompt-trust):
- *   1. READ_OPERATIONS_ONLY=true on the MCP server (see aws-mcp.ts).
- *   2. Read-only IAM on the runtime principal (enforced at deploy).
- *   3. The system prompt below — a courtesy layer, NOT a control.
+ * Architecture:
+ *   - `KnowledgeBase` block (bb-knowledge-base) indexes the ./knowledge folder:
+ *     chunk -> embed (Titan) -> S3 Vectors. Local dev uses TF-IDF (free, no Bedrock).
+ *   - `Agent` block (bb-agent) with a `searchDocs` tool that calls kb.retrieve();
+ *     Claude answers from the retrieved passages and cites the source document.
+ *   - `AuthBasic` + an invite-code gate scope access to invited teammates.
  */
-import { ApiNamespace, Scope, AuthBasic, Agent, OllamaModels, AppSetting } from '@aws-blocks/blocks';
+import {
+  ApiNamespace,
+  Scope,
+  AuthBasic,
+  Agent,
+  OllamaModels,
+  AppSetting,
+  KnowledgeBase,
+} from '@aws-blocks/blocks';
 import { z } from 'zod';
-import { runAwsRead } from './aws-mcp.js';
 
 const scope = new Scope('ask-aws');
 
@@ -28,8 +31,7 @@ const auth = new AuthBasic(scope, 'auth', {
   crossDomain: process.env.BLOCKS_SANDBOX === 'true',
 });
 // Secret invite code that gates signup — set out-of-band (SSM SecureString in prod,
-// .bb-data/settings.json locally), never committed. Without it no one can create an
-// account, so a public deploy can't be abused to burn Bedrock budget.
+// .bb-data/settings.json locally), never committed. Only invited teammates can sign up.
 const inviteCode = new AppSetting(scope, 'invite-code', {
   name: '/ask-aws/invite-code',
   secret: true,
@@ -38,63 +40,107 @@ const inviteCode = new AppSetting(scope, 'invite-code', {
 // NOTE: we deliberately do NOT expose auth.createApi() (the raw public signup
 // endpoint). Auth is routed through the gated `api` methods below instead.
 
-// ─── Agent ───────────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are a read-only assistant for the user's AWS account. Your default region is
-ap-northeast-1 (Tokyo); use other regions only when the user names them.
-
-You can inspect resources, costs, metrics, logs, and configuration using the
-runAwsRead tool, which runs AWS read commands. You have READ-ONLY access. You must
-never attempt to create, modify, or delete anything. If the user asks for a change,
-explain what command would do it and tell them to run it themselves.
-
-IMPORTANT — ALWAYS ACT, NEVER DESCRIBE: To answer ANY question about the account,
-you MUST call the runAwsRead tool and base your answer ONLY on its actual output.
-Never describe what a command "would" return, and never answer from your own
-knowledge — call runAwsRead, wait for the real result, then summarize it. For
-"list my S3 buckets", call runAwsRead with command "s3api list-buckets".
-
-Work efficiently:
-- Prefer targeted queries over broad dumps. Request only the data you need.
-- Summarize results in plain language. Do not paste large raw payloads back to the user.
-- Cost Explorer calls are billed per request, so minimize and batch cost queries.
-- If a request is ambiguous about region, service, or time window, ask one short
-  clarifying question before running expensive or broad calls.
-- Always state the exact AWS command you used so the user can reproduce it.
-- If any output contains credentials, access keys, or secrets, redact them. Never
-  echo secret values.
-
-When calling runAwsRead, pass the command WITHOUT the leading "aws" — for example
-"ec2 describe-instances --region ap-northeast-1" or "s3api list-buckets".`;
-
-const agent = new Agent(scope, 'aws-agent', {
-  // Deployed: the `jp.` Sonnet 4.6 inference profile so inference stays inside
-  // Japan (Tokyo), not the `us.` default that BedrockModels.DEFAULT would use.
-  // Local: Ollama llama3.2:3b (~2 GB, fits this M2's ~5.3 GiB GPU without the
-  // crash 8b caused); falls back to the canned mock if Ollama isn't running.
-  model: {
-    deployed: { provider: 'bedrock', modelId: 'jp.anthropic.claude-sonnet-4-6' },
-    local: OllamaModels.XSMALL,
-  },
-  systemPrompt: SYSTEM_PROMPT,
-  streamingMode: 'token', // typewriter-style UI
-  tools: (tool) => ({
-    runAwsRead: tool({
-      description:
-        'Run a single READ-ONLY AWS CLI command and return its output. Use for ' +
-        'describe/list/get operations to inspect resources, costs, metrics, logs, ' +
-        'and configuration. Pass the command WITHOUT the leading "aws", e.g. ' +
-        '"ec2 describe-instances --region ap-northeast-1". Never use mutating verbs ' +
-        '(create/delete/put/modify/update/run/terminate/...).',
-      parameters: z.object({
-        command: z
-          .string()
-          .describe('AWS CLI command without the leading "aws", e.g. "s3api list-buckets"'),
-      }),
-      needsApproval: false, // read-only; IAM + READ_OPERATIONS_ONLY are the real guard
-      handler: async ({ input }) => runAwsRead(input.command),
-    }),
-  }),
+// ─── Knowledge base (RAG source) ──────────────────────────────────────────────
+// Indexes everything in ./knowledge. Local dev scores with TF-IDF (free); on AWS it
+// embeds with Titan and stores vectors in S3 Vectors (serverless, pay-per-use).
+// removalPolicy 'destroy' so teardown removes the doc bucket + embeddings — this is
+// meant to be a temporary handover assistant.
+const kb = new KnowledgeBase(scope, 'docs', {
+  source: './knowledge',
+  description: 'Team handover documents',
+  removalPolicy: 'destroy',
 });
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+// The models a user can pick in the UI. Every entry becomes its own Agent block
+// (bb-agent binds the model at construction — there is no per-request override),
+// so a conversation is tied to the model it was started with.
+// All jp.* profiles keep inference inside Japan; Nova Pro only has an apac.
+// profile (may route across APAC); Nemotron is on-demand, local to ap-northeast-1.
+// Keys double as the Agent block id (`agent-<key>`), which feeds the S3 snapshot bucket
+// name. S3 caps bucket names at 63 chars and the name includes the stack + scope chain,
+// so keys are kept SHORT — the descriptive text lives in `label`, which is what the UI
+// shows. (A long key like "nemotron-nano-30b" pushed the derived name to 69 chars.)
+const MODELS = {
+  sonnet: { label: 'Claude Sonnet 4.6', modelId: 'jp.anthropic.claude-sonnet-4-6' },
+  nova: { label: 'Amazon Nova Pro', modelId: 'apac.amazon.nova-pro-v1:0' },
+  nemotron: { label: 'Nvidia Nemotron Nano 3 30B', modelId: 'nvidia.nemotron-nano-3-30b' },
+} as const;
+
+type ModelKey = keyof typeof MODELS;
+const DEFAULT_MODEL: ModelKey = 'sonnet';
+
+// ─── Agent ───────────────────────────────────────────────────────────────────
+const SYSTEM_PROMPT = `You answer questions about a set of team handover documents, so colleagues can
+self-serve while the document owner is away.
+
+To answer ANY question, you MUST first call the searchDocs tool to find relevant
+passages, then answer using ONLY what those passages say. Do not answer from your own
+general knowledge, and do not guess.
+
+- Cite the source document for each fact (use the "source" field from the results).
+- If the documents don't contain the answer, say so plainly — e.g. "I couldn't find
+  that in the handover documents" — rather than inventing one.
+- Keep answers concise and skimmable; quote short snippets when it helps.
+- If a question is ambiguous, ask one short clarifying question before searching.
+
+TONE & PERSONA:
+- By default, use a warm but professional, concise tone.
+- If the user's message begins with the marker "[[FUN]]", ignore the marker itself and
+  answer in a playful "Tokyo hiking buddy" persona: upbeat and a little witty, with the
+  occasional fitting emoji (⛩️ 🗻 🥾) and a light Tokyo/hiking metaphor. Keep it genuinely
+  helpful, never cringe.
+- Persona affects ONLY tone. It never overrides the rules above: always search first,
+  answer only from the documents, cite sources, and never invent facts to be entertaining.
+
+(The "[[FUN]]" marker is added automatically by the UI in fun mode — never mention it or
+echo it back to the user.)`;
+
+// bb-agent binds the model at construction, so "let the user pick a model" means one
+// Agent block per model. They share the same system prompt, tools, and knowledge base;
+// only the deployed modelId differs. Local dev always uses Ollama (the selector still
+// routes to the right block, so per-model conversation storage stays isolated locally).
+function buildAgent(key: ModelKey) {
+  return new Agent(scope, `agent-${key}`, {
+    model: {
+      deployed: { provider: 'bedrock', modelId: MODELS[key].modelId },
+      local: OllamaModels.XSMALL, // llama3.2:3b; falls back to canned mock if Ollama is down
+    },
+    systemPrompt: SYSTEM_PROMPT,
+    streamingMode: 'token', // typewriter-style UI
+    tools: (tool) => ({
+      searchDocs: tool({
+        description:
+          'Search the handover documents for passages relevant to the user\'s question. ' +
+          'Call this for ANY question about the documents/handover. Returns ranked chunks, ' +
+          'each with its `source` document and a relevance `score`.',
+        parameters: z.object({
+          query: z.string().describe('What to look for, in natural language'),
+          maxResults: z.number().optional().describe('Max passages to return (default 5)'),
+        }),
+        needsApproval: false, // read-only retrieval
+        handler: async ({ input }) => {
+          const results = await kb.retrieve(input.query, { maxResults: input.maxResults ?? 5 });
+          // Map to a plain JSON shape (RetrieveResult is an interface, not a JSONValue)
+          // and hand the model just what it needs to answer + cite the source.
+          return results.map((r) => ({ text: r.text, source: r.source, score: r.score }));
+        },
+      }),
+    }),
+  });
+}
+
+// One agent block per selectable model, keyed by ModelKey.
+const agents = Object.fromEntries(
+  (Object.keys(MODELS) as ModelKey[]).map((key) => [key, buildAgent(key)]),
+) as Record<ModelKey, ReturnType<typeof buildAgent>>;
+
+// Resolve an agent from an untrusted client-supplied model key. Unknown/absent keys
+// fall back to the default rather than throwing — the caller never controls infra.
+function resolveAgent(model?: string): { key: ModelKey; agent: ReturnType<typeof buildAgent> } {
+  const key = (model && model in MODELS ? model : DEFAULT_MODEL) as ModelKey;
+  return { key, agent: agents[key] };
+}
 
 // ─── API ─────────────────────────────────────────────────────────────────────
 // userId is always derived server-side from the authenticated session — never
@@ -125,33 +171,63 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return { username: user.username };
   },
 
-  // ─── Agent ───────────────────────────────────────────────────────────────────
-  async createConversation() {
-    const user = await auth.requireAuth(context);
-    return { conversationId: await agent.createConversationId(user.username) };
+  // ─── Models ────────────────────────────────────────────────────────────────
+  /** The models a signed-in user can choose from (backend is the single source of truth). */
+  async listModels() {
+    await auth.requireAuth(context);
+    return {
+      models: (Object.keys(MODELS) as ModelKey[]).map((key) => ({ key, label: MODELS[key].label })),
+      defaultModel: DEFAULT_MODEL as string,
+    };
   },
 
-  async sendMessage(conversationId: string, message: string, channelId: string) {
+  // ─── Agent ───────────────────────────────────────────────────────────────────
+  // Every conversation-scoped call carries the model key: storage and the Realtime
+  // channel are per-agent, so a conversation must be read/streamed on the SAME agent
+  // that created it. The client keeps the key consistent for a conversation's lifetime.
+  async createConversation(model?: string) {
     const user = await auth.requireAuth(context);
-    await assertOwns(user.username, conversationId);
+    const { key, agent } = resolveAgent(model);
+    return { conversationId: await agent.createConversationId(user.username), model: key };
+  },
+
+  async sendMessage(conversationId: string, message: string, channelId: string, model?: string) {
+    const user = await auth.requireAuth(context);
+    const { agent } = resolveAgent(model);
+    await assertOwns(agent, user.username, conversationId);
     await agent.stream(message, { conversationId, channelId, userId: user.username });
     return { ok: true };
   },
 
-  async getConversation(conversationId: string) {
+  async getConversation(conversationId: string, model?: string) {
     const user = await auth.requireAuth(context);
-    await assertOwns(user.username, conversationId);
+    const { agent } = resolveAgent(model);
+    await assertOwns(agent, user.username, conversationId);
     return { messages: await agent.getConversation(conversationId) };
   },
 
-  async getChannel(channelId: string) {
+  async getChannel(channelId: string, model?: string) {
     await auth.requireAuth(context);
+    const { agent } = resolveAgent(model);
     return agent.getChannel(channelId);
+  },
+
+  /** Delete a conversation (used by "New chat" so abandoned threads don't pile up). */
+  async deleteConversation(conversationId: string, model?: string) {
+    const user = await auth.requireAuth(context);
+    const { agent } = resolveAgent(model);
+    await assertOwns(agent, user.username, conversationId);
+    await agent.deleteConversation(conversationId, user.username);
+    return { ok: true };
   },
 }));
 
-/** Throw unless `userId` owns `conversationId`. */
-async function assertOwns(userId: string, conversationId: string): Promise<void> {
+/** Throw unless `userId` owns `conversationId` on the given agent. */
+async function assertOwns(
+  agent: ReturnType<typeof buildAgent>,
+  userId: string,
+  conversationId: string,
+): Promise<void> {
   const owned = await agent.listConversations(userId);
   if (!owned.some((c) => c.conversationId === conversationId)) {
     throw new Error('Conversation not found');

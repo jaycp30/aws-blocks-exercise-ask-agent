@@ -401,6 +401,100 @@ npx cdk synth --quiet \
 ```
 If synth is clean, the deploy will get past the build/module-load stage.
 
+## 6. The RAG pivot — "Ask my handover docs"
+
+### Why we pivoted (and why the app never got write access)
+
+The original ask was to give the deployed agent real powers ("actually do things
+for me") by granting it PowerUser/SystemAdministrator. Rejected, with reasons worth
+keeping: a **publicly reachable AI agent with write access to a personal AWS
+account** is a cost-bomb + prompt-injection + resource-destruction risk — anyone
+with the invite code (or a leaked one) could talk the model into creating or
+deleting resources. Read-only was the safe ceiling for a public demo.
+
+Instead the app pivoted to the exercise's original idea: **RAG (Retrieval-Augmented
+Generation)** over a set of handover documents — "ask my docs" instead of "ask my
+AWS account" — something a team can query while the author is away.
+
+### What changed in the code
+
+- `aws-blocks/aws-mcp.ts` + `scripts/smoke-mcp.ts` **deleted** (the MCP/AWS tool is gone).
+- `aws-blocks/index.ts`: added a `KnowledgeBase` block and a `searchDocs` tool:
+
+```ts
+const kb = new KnowledgeBase(scope, 'docs', {
+  source: './knowledge',        // local folder, uploaded to S3 on deploy
+  removalPolicy: 'destroy',     // exercise stack — clean teardown
+});
+```
+
+- System prompt rewritten for RAG discipline: **search first, answer only from
+  retrieved passages, cite the source file, say "not found" otherwise.**
+- Frontend re-themed ("Ask my handover docs").
+- The e2e tests survived almost untouched — they test *flows* (signup with invite
+  code, send a message, get a reply), not implementation details, so swapping the
+  agent's tool didn't break them. That's the payoff of writing e2e tests against
+  behavior instead of internals.
+
+### Type gotcha: tool results must be `JSONValue`
+
+Returning `kb.retrieve(query)` directly from the tool handler fails to compile:
+`RetrieveResult[]` is not assignable to `JSONValue` (the interface has no index
+signature). Map to a plain shape instead:
+
+```ts
+const results = await kb.retrieve(query);
+return results.map((r) => ({ text: r.text, source: r.source, score: r.score }));
+```
+
+General lesson: **tool handlers return data that gets serialised into the model's
+context** — keep returns as plain JSON-shaped objects, not SDK types.
+
+### KnowledgeBase: local vs cloud are different machines
+
+| | Local dev (`npm run dev`) | Cloud (deployed) |
+|---|---|---|
+| Search index | **TF-IDF** (free, instant, no ML) | **Titan v2 embeddings** + S3 Vectors |
+| Matching | Literal keywords only | Semantic (synonyms/paraphrase match) |
+| File formats | `.md .txt .html .htm .csv .json` only — **PDFs are silently skipped** (a `console.warn` in the dev terminal is the only hint) | Bedrock parses binaries too: `.pdf .doc .docx .xls .xlsx` |
+| Ingestion | Instant at startup, cached in `.bb-data/<id>/chunks.json`, auto-invalidated by content hash | **Asynchronous after deploy** — `retrieve()` returns empty until sync completes (minutes); check `kb.isSynced()` / `kb.waitUntilSynced()` |
+| Idle cost | Free | S3 Vectors is serverless — no idle compute; you pay embedding calls at ingestion + storage |
+
+Two practical consequences:
+
+1. **Don't judge retrieval quality locally.** TF-IDF only matches literal words
+   ("who approves deploys?" won't find "sign-off from Priya for production
+   releases"). Local dev proves the plumbing; the cloud judges quality.
+2. **The post-deploy "it's broken" moment is expected.** First queries after
+   `npm run deploy` return nothing until Bedrock finishes chunking + embedding.
+   Wait, or poll `isSynced()`.
+
+To test PDF-ish content locally anyway, convert first (`pdftotext -layout in.pdf
+out.txt` — `-layout` preserves table columns, which matters for statements).
+
+### TF-IDF in one paragraph
+
+**T**erm **F**requency – **I**nverse **D**ocument **F**requency: classic pre-ML
+ranking. A chunk scores high if the query's words appear often in it (term
+frequency), weighted by how *rare* each word is across all chunks (inverse document
+frequency) — so "rollback" and "Priya" count for a lot, "the" and "account" for
+almost nothing. Pure word counting: free, instant, no model — which is exactly why
+the local mock uses it.
+
+### Privacy guard: `knowledge/` and a public repo
+
+This repo is public, and `knowledge/` holds real documents. `.gitignore` uses:
+
+```gitignore
+knowledge/*
+!knowledge/SAMPLE-handover.md
+```
+
+Note the form: `knowledge/*` (ignore *contents*), not `knowledge/` (ignore the
+*directory*) — git cannot re-include a file inside an ignored directory, so the
+`!` exception only works with the first form. The sample doc stays tracked so a
+fresh clone works out of the box; everything else stays local.
+
 ## Appendix — commands used in this exercise
 
 ```bash
