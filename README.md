@@ -40,6 +40,9 @@ plumbing, that is the whole appeal.
 > this app's entire serverless backend. See the architecture diagram for the resources
 > they expand into.
 
+**Reference:** official AWS Blocks repository —
+[github.com/aws-devtools-labs/aws-blocks](https://github.com/aws-devtools-labs/aws-blocks)
+
 ## Architecture
 
 ![Serverless architecture: Browser → CloudFront → API Gateway → Lambda → SQS → Agent Lambda → Bedrock/S3 Vectors, streamed back over WebSocket](docs/architecture.png)
