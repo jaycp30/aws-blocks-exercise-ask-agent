@@ -96,15 +96,3 @@ with TOTP MFA; local dev captures the verification codes in-process (no real ema
 | `npm run typecheck` | TypeScript type checking |
 | `npm run sandbox` | Deploy backend to AWS, serve frontend locally |
 | `npm run deploy` | Full production deploy (adds CloudFront/S3 hosting) |
-
-## For Agents
-
-Full Building Block documentation: `node_modules/@aws-blocks/blocks/README.md`
-
-**Do not use local files or in-memory storage** — use Building Blocks for all data
-persistence and cloud abstractions (they mock locally and deploy to AWS automatically).
-
-Start in `aws-blocks/index.ts` (backend) and `src/App.tsx` (frontend). Test via
-`npm run test:e2e`. The API transport (JSON-RPC) is auto-generated and intentionally
-invisible — do not curl endpoints directly. Testing is best done through the e2e tests,
-which use the same typed client as the frontend.
