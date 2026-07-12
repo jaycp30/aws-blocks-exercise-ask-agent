@@ -8,6 +8,10 @@ came up while building, with the answer distilled for future reference.
 > Stack: AWS Blocks (`@aws-blocks/*`) · Strands Agents SDK · AWS API MCP server
 > (`awslabs.aws-api-mcp-server`) · React + Vite · target region ap-northeast-1 (Tokyo).
 
+**Companion pages:** [Glossary — acronyms & technical terms](./glossary.md) ·
+[How RAG is implemented in this exercise](./rag-implementation.md) ·
+[Agent tools — what they are & how to add them](./agent-tools.md)
+
 ---
 
 ## 1. AWS Blocks fundamentals
@@ -402,6 +406,10 @@ npx cdk synth --quiet \
 If synth is clean, the deploy will get past the build/module-load stage.
 
 ## 6. The RAG pivot — "Ask my handover docs"
+
+> For the architecture reference (services, index/query flow, S3 Vectors vs
+> OpenSearch, key files) see [How RAG is implemented](./rag-implementation.md).
+> This section is the *story* of the pivot and the gotchas hit along the way.
 
 ### Why we pivoted (and why the app never got write access)
 
