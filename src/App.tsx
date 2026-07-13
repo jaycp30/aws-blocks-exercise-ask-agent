@@ -180,9 +180,9 @@ function ChatApp({
       speed={fx.border.speed}
       chaos={fx.border.chaos}
       borderRadius={16}
-      className="mx-auto w-full max-w-[min(85%,1400px)]"
+      className="mx-auto w-full max-w-[min(93.5%,1540px)]"
     >
-      <div className="panel flex h-[clamp(440px,65dvh,720px)] w-full flex-col p-4 sm:h-[clamp(500px,65dvh,760px)]">
+      <div className="panel flex h-[clamp(484px,71.5dvh,792px)] w-full flex-col p-4 sm:h-[clamp(550px,71.5dvh,836px)]">
         <div className="flex items-center justify-end gap-2.5 pb-2 mb-1 border-b border-[var(--border)]">
           {models.length > 0 && (
             <label className="flex items-center gap-1.5 text-[0.7em] text-[var(--text-muted)]">
