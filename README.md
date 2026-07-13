@@ -65,15 +65,25 @@ with TOTP MFA; local dev captures the verification codes in-process (no real ema
 
 ## Project Structure
 
-| Path | Purpose |
-|------|---------|
-| `aws-blocks/index.ts` | Backend: auth, knowledge base, agents, and the JSON-RPC API |
-| `aws-blocks/index.cdk.ts` | The CDK stack Blocks derives (adds `Hosting` on deploy) |
-| `src/App.tsx` | Frontend: React chat UI with live token streaming |
-| `src/main.tsx` | React entry point |
-| `knowledge/` | The source documents the agent indexes and answers from |
-| `test/e2e.test.ts` | Tests: auth, conversations, retrieval, ownership |
-| `docs/` | Exercise write-up, glossary, RAG + Cognito deep-dives |
+```
+aws-ask-agent/
+├── aws-blocks/            ← BACKEND (becomes AWS infrastructure)
+│   ├── index.ts           ← the whole backend: auth, KB, agents, API  ★
+│   ├── index.cdk.ts       ← the CDK stack Blocks derives; adds Hosting
+│   ├── index.handler.ts   ← the Lambda entry point
+│   └── scripts/           ← deploy / sandbox / reindex / destroy tooling
+├── src/                   ← FRONTEND (React + Vite, becomes static files)
+│   ├── App.tsx            ← the chat UI + all auth flows (651 lines)
+│   ├── session.ts         ← client-side auth/session handling
+│   └── components/        ← purely visual FX (DecryptedText, LightRays…)
+├── knowledge/             ← the RAG corpus (docs the agent answers from)
+├── test/e2e.test.ts       ← tests via the same typed client the UI uses
+└── docs/                  ← writeups; rag-implementation.md covers the RAG design
+```
+
+The two halves never import each other's internals — they connect through one typed
+API object (`import { api } from 'aws-blocks'`), with the JSON-RPC transport generated
+and invisible.
 
 ## What's Included
 

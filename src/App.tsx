@@ -61,11 +61,24 @@ function useRotatingMessage(messages: string[], active: boolean): string {
 // `model` is fixed for the lifetime of a ChatApp instance: App keys <ChatApp> by model,
 // so switching models remounts this component with a fresh conversation. That matches the
 // backend, where each model is a separate agent with its own storage and Realtime channel.
-function ChatApp({ model, copy, theme }: { model: string; copy: ThemeCopy; theme: Theme }) {
+function ChatApp({
+  model,
+  models,
+  onModelChange,
+  copy,
+  theme,
+}: {
+  model: string;
+  models: ModelOption[];
+  onModelChange: (model: string) => void;
+  copy: ThemeCopy;
+  theme: Theme;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const thinkingMessage = useRotatingMessage(copy.thinking, loading);
 
   // Hold the live theme in a ref so the send closure below (created once) reads the
@@ -113,6 +126,16 @@ function ChatApp({ model, copy, theme }: { model: string; copy: ThemeCopy; theme
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  // Auto-grow the composer as the user types across lines, up to a cap; past the cap
+  // it scrolls internally. Runs on every input change, including the reset to '' after
+  // send, so the box snaps back to one line once a message is sent.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
+
   // On mount (i.e. per model), resume the last conversation for this model if we saved
   // one; otherwise the first send lazily creates a fresh one. Tear down the subscription
   // on unmount (e.g. when switching models remounts this component).
@@ -157,10 +180,25 @@ function ChatApp({ model, copy, theme }: { model: string; copy: ThemeCopy; theme
       speed={fx.border.speed}
       chaos={fx.border.chaos}
       borderRadius={16}
-      className="mx-auto w-full max-w-[760px]"
+      className="mx-auto w-full max-w-[min(85%,1400px)]"
     >
       <div className="panel flex h-[clamp(440px,65dvh,720px)] w-full flex-col p-4 sm:h-[clamp(500px,65dvh,760px)]">
-        <div className="flex justify-end pb-2 mb-1 border-b border-[var(--border)]">
+        <div className="flex items-center justify-end gap-2.5 pb-2 mb-1 border-b border-[var(--border)]">
+          {models.length > 0 && (
+            <label className="flex items-center gap-1.5 text-[0.7em] text-[var(--text-muted)]">
+              {copy.modelLabel}
+              <select
+                value={model}
+                onChange={(e) => onModelChange(e.target.value)}
+                className="field px-2 py-1.5 text-[0.9em]"
+                title={copy.modelHint}
+              >
+                {models.map((m) => (
+                  <option key={m.key} value={m.key}>{m.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <button
             onClick={newChat}
             disabled={loading || messages.length === 0}
@@ -206,14 +244,24 @@ function ChatApp({ model, copy, theme }: { model: string; copy: ThemeCopy; theme
           )}
         </div>
 
-        <div className="flex gap-2 pt-3 mt-2 border-t border-[var(--border)]">
-          <input
+        <div className="flex items-end gap-2 pt-3 mt-2 border-t border-[var(--border)]">
+          <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && send()}
+            onKeyDown={(e) => {
+              // Enter sends; Shift+Enter inserts a newline. Skip send while an IME
+              // composition is active so confirming kana/kanji candidates with Enter
+              // doesn't fire the message.
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                send();
+              }
+            }}
             placeholder={copy.inputPlaceholder}
             disabled={loading}
-            className="field flex-1 px-3 py-2.5 text-[0.95em]"
+            rows={1}
+            className="field flex-1 px-3 py-2.5 text-[0.95em] resize-none max-h-40 overflow-y-auto"
           />
           <button onClick={send} disabled={loading || !input.trim()} className="btn-accent px-4 py-2.5 font-medium whitespace-nowrap">
             {copy.sendLabel}
@@ -591,25 +639,15 @@ export function App() {
           />
         </div>
       )}
-      <div className="relative z-[1] p-4 sm:p-6 max-w-[900px] mx-auto">
-        <header className="mb-5">
-          <div className="flex flex-col items-start gap-4 sm:flex-row sm:justify-between">
-            <div className="min-w-0">
-              <h1 className="neon-title text-xl sm:text-2xl font-bold mb-1">{copy.title}</h1>
-              <p className="text-[0.9em] text-[var(--text-muted)] m-0 max-w-[560px]">{copy.subtitle}</p>
-            </div>
-            {user && (
-              <button
-                onClick={signOut}
-                className="btn-ghost shrink-0 self-end px-3 py-2 whitespace-nowrap text-[0.85em] sm:self-auto"
-                title="Sign out of this account"
-              >
-                Sign out
-              </button>
-            )}
+      <div className="relative z-[1] p-4 sm:p-6">
+        {/* Header spans the full window so the title hugs the top-left corner and the
+            controls hug the top-right — the chat/auth content below stays centered. */}
+        <header className="mb-5 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="neon-title text-xl sm:text-2xl font-bold mb-1">{copy.title}</h1>
+            <p className="text-[0.9em] text-[var(--text-muted)] m-0 max-w-[560px]">{copy.subtitle}</p>
           </div>
-
-          <div className="mt-4 flex flex-wrap items-end justify-end gap-2.5">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               onClick={toggleTheme}
               className="btn-ghost px-3 py-2 text-[1.15em] leading-none"
@@ -618,33 +656,33 @@ export function App() {
             >
               {theme === 'fun' ? '⛩️' : '🌤️'}
             </button>
-            {user && models.length > 0 && model && (
-              <label className="flex min-w-[200px] flex-col gap-1 text-[0.7em] text-[var(--text-muted)]">
-                {copy.modelLabel}
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="field px-2 py-1.5 text-[0.9em]"
-                  title={copy.modelHint}
-                >
-                  {models.map((m) => (
-                    <option key={m.key} value={m.key}>{m.label}</option>
-                  ))}
-                </select>
-              </label>
+            {user && (
+              <button
+                onClick={signOut}
+                className="btn-ghost px-3 py-2 whitespace-nowrap text-[0.85em]"
+                title="Sign out of this account"
+              >
+                Sign out
+              </button>
             )}
           </div>
         </header>
 
-        {loading ? (
-          <p className="text-[var(--text-muted)]">Loading…</p>
-        ) : user ? (
-          // Key by model: changing the selection remounts ChatApp with a fresh conversation
-          // on the newly chosen agent. Wait for a resolved model so the first mount is correct.
-          model ? <ChatApp key={model} model={model} copy={copy} theme={theme} /> : <p className="text-[var(--text-muted)]">Loading…</p>
-        ) : (
-          <AuthGate onAuthed={setUser} copy={copy} />
-        )}
+        <div>
+          {loading ? (
+            <p className="text-[var(--text-muted)]">Loading…</p>
+          ) : user ? (
+            // Key by model: changing the selection remounts ChatApp with a fresh conversation
+            // on the newly chosen agent. Wait for a resolved model so the first mount is correct.
+            model ? (
+              <ChatApp key={model} model={model} models={models} onModelChange={setModel} copy={copy} theme={theme} />
+            ) : (
+              <p className="text-[var(--text-muted)]">Loading…</p>
+            )
+          ) : (
+            <AuthGate onAuthed={setUser} copy={copy} />
+          )}
+        </div>
       </div>
     </div>
   );
