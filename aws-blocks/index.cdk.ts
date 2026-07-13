@@ -40,12 +40,43 @@ if (sandboxMode) {
   blocksStack.handler.addEnvironment('BLOCKS_SANDBOX', 'true');
 }
 
+// Content-Security-Policy for the static site. Without this, CloudFront serves the
+// AWS managed SecurityHeadersPolicy, which intentionally ships no CSP. Setting the
+// prop makes Hosting attach a custom response-headers policy carrying this value.
+//
+// Values were validated against the actual `npm run build` output:
+//   - script-src 'self' (no 'unsafe-inline'/'unsafe-eval'): the build emits only an
+//     external module script and no eval/Function — so scripts are fully locked down.
+//   - style-src keeps 'unsafe-inline': the built index.html has one inline <style> and
+//     GSAP animates via inline style attributes.
+//   - img-src/font-src add data: for inline data-URI assets; no external origins load.
+//   - connect-src keeps https: and wss:: the Realtime subscription connects to a
+//     cross-origin AppSync endpoint (https handshake + wss stream) not known at build
+//     time. A future tightening is to pin that exact endpoint host here.
+//   - base-uri/object-src/frame-ancestors/form-action are defense-in-depth hardening.
+// Note: Permissions-Policy is NOT set — Hosting has no prop for it, so it would need a
+// separate custom CloudFront response-headers policy (tracked as a follow-up).
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "connect-src 'self' https: wss:",
+  'upgrade-insecure-requests',
+].join('; ');
+
 // Add static site hosting only when deploying (not in sandbox mode)
 if (!sandboxMode) {
   new Hosting(blocksStack, 'Hosting', {
     root: join(__dirname, '..'),
     buildCommand: 'npm run build',
     buildOutputDir: 'dist',
-    api: blocksStack
+    api: blocksStack,
+    contentSecurityPolicy: CONTENT_SECURITY_POLICY
   });
 }

@@ -166,3 +166,19 @@ test("agent: reads of another user's conversation are rejected", async () => {
 
   await assert.rejects(() => api.getConversation(conversationId), 'cross-user read must be denied');
 });
+
+test("agent: subscriptions to another user's realtime channel are rejected", async () => {
+  // U1 owns a fresh conversation; its id doubles as the Realtime channel id.
+  await api.signOut();
+  await signInExistingLocalUser(U1, U1_RESET_PASSWORD);
+  const { conversationId } = await api.createConversation();
+
+  // U2 must not be able to obtain a signed subscription token for U1's channel,
+  // even knowing the conversation UUID (Finding 1 — cross-user realtime authorization).
+  await api.signOut();
+  await signInExistingLocalUser(U2, 'OtherPass123!');
+  await assert.rejects(
+    () => api.getChannel(conversationId),
+    'cross-user realtime channel must be denied',
+  );
+});

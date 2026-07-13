@@ -503,6 +503,90 @@ Note the form: `knowledge/*` (ignore *contents*), not `knowledge/` (ignore the
 `!` exception only works with the first form. The sample doc stays tracked so a
 fresh clone works out of the box; everything else stays local.
 
+## 7. Security remediation pass (2026-07-13)
+
+After the app was live, a second security QA pass (four prompts: security headers,
+OWASP review, credential-leak scan, exposed-API-key scan) produced a set of confirmed
+findings. Those findings were filed as GitHub issues, and this pass implemented the
+subset that is pure application code plus one CloudFront config change. The billable
+controls (WAF, Cognito threat protection) were deliberately left for a later, cost-gated
+change.
+
+Good news first: no exposed API key, AWS credential, private key, or credible secret
+was found anywhere — not in source, tracked files, git history, the live JS bundle
+(~537 KB), the public `/.blocks-sandbox/config.json` (28 bytes, only `apiUrl`), or
+`localStorage` (theme + conversation UUID only). Cognito tokens never touch the browser;
+the session cookie is an opaque, `HttpOnly`/`Secure`/`SameSite=Lax` pointer. So findings
+3 and 4 of the QA (leak checks) passed clean. The rest were hardening gaps.
+
+### What was fixed
+
+**Realtime channel authorization (the real bug).** Every conversation route derived
+`userId` from the server-side session *and* verified ownership via `assertOwns()` — every
+route except `getChannel()`, which checked only "are you signed in?". Because the Realtime
+channel id **is** the conversation UUID (`src/App.tsx` `subscribe()`), any signed-in user
+who learned another user's conversation UUID could mint a signed WebSocket subscription
+token and read that user's streamed replies. This is a classic BOLA / IDOR: authentication
+(*who are you*) is not authorization (*may you touch this object*). Object-level ownership
+must be checked on **every** route that takes a client-supplied object id — no exceptions.
+
+The fix (`aws-blocks/index.ts`, `getChannel`) is one line of enforcement:
+
+```ts
+await assertOwns(agent, user.username, channelId);
+```
+
+A permanent regression test was added (`test/e2e.test.ts`): User A creates a conversation,
+User B signs in and must be *rejected* when calling `getChannel(conversationId)`. The test
+was proven to have teeth by temporarily removing the guard and watching it fail with
+`Missing expected rejection: cross-user realtime channel must be denied`, then restoring it.
+Model-switching cannot bypass the check: channels are per-agent, so a mismatched model just
+fails to find the conversation and still rejects.
+
+**Input / cost guards.** Two cheap bounds against a single request running up an unbounded
+Bedrock token bill (`aws-blocks/index.ts`):
+
+- `sendMessage` now rejects empty and oversized messages (8 000-char cap) *before* the
+  ownership lookup or Bedrock call.
+- The `searchDocs` tool clamps `maxResults` to `[1, 10]` (the underlying block otherwise
+  permits up to 100), so a model- or client-supplied value can't request an unbounded
+  retrieval.
+
+**Content-Security-Policy (`aws-blocks/index.cdk.ts`).** The live site relied on the AWS
+managed SecurityHeadersPolicy, which intentionally ships no CSP. A CSP is the browser's
+allowlist for scripts/styles/connections — the second line of defense if an XSS payload
+ever lands. Rather than paste a generic CSP, each directive was validated against the
+actual `npm run build` output, which let it be *stricter* than a naive draft:
+
+- `script-src 'self'` with **no `'unsafe-inline'` and no `'unsafe-eval'`** — verified the
+  bundle has zero inline scripts and zero `eval`/`Function`. This is the highest-value CSP
+  directive.
+- `connect-src 'self' https: wss:` kept permissive on purpose — the Realtime subscription
+  connects to a cross-origin AppSync endpoint (https handshake + wss stream); a `wss:`-only
+  policy would break streaming. A future tightening is to pin that exact endpoint host.
+- `style-src 'self' 'unsafe-inline'` — the built `index.html` has one inline `<style>` and
+  GSAP animates via inline style attributes.
+- `base-uri`/`object-src 'none'`/`frame-ancestors 'none'`/`form-action 'self'`/
+  `upgrade-insecure-requests` as defense-in-depth.
+
+CSP is a CloudFront header, so it only takes effect after `npm run deploy`; verify in the
+browser (DevTools console: no CSP violations, chat still streams) before trusting it.
+`Permissions-Policy` is still missing — `Hosting` has no prop for it, so it needs a separate
+custom CloudFront response-headers policy (follow-up).
+
+### Mapping to the GitHub issues
+
+| Issue | Status after this pass |
+|-------|------------------------|
+| [#3 Authorize realtime channel subscriptions](https://github.com/jaycp30/aws-blocks-exercise-ask-agent/issues/3) | **Resolved** — ownership check + negative test; all acceptance criteria met (close after deploy). |
+| [#1 Add WAF and API rate limiting](https://github.com/jaycp30/aws-blocks-exercise-ask-agent/issues/1) | **Partial** — the "cap user message length, reject before Bedrock" criterion is done; WAF / API-Gateway throttle / per-user limits deferred (billable). |
+| [#8 Bound retrieval and conversation growth](https://github.com/jaycp30/aws-blocks-exercise-ask-agent/issues/8) | **Partial** — `maxResults` clamp done (issue suggested 1–8; used 1–10); indexed ownership lookup, history pagination, latency metrics still open. |
+| [#10 Deployed RAG / authz / model smoke tests](https://github.com/jaycp30/aws-blocks-exercise-ask-agent/issues/10) | **Partial** — cross-user realtime-channel negative test added (local, canned provider); the deployed RAG/model/injection suite is still open. |
+| [#11 Upgrade Vite and esbuild](https://github.com/jaycp30/aws-blocks-exercise-ask-agent/issues/11) | **Not started** — dev-server-only advisories; low urgency. |
+
+The CSP work is **not tracked by any existing issue** — it is net-new hardening beyond the
+filed list (there was no security-headers issue).
+
 ## Appendix — commands used in this exercise
 
 ```bash

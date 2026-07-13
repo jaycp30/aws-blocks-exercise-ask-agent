@@ -91,6 +91,14 @@ const MODELS = {
 type ModelKey = keyof typeof MODELS;
 const DEFAULT_MODEL: ModelKey = 'sonnet';
 
+// ─── Abuse / cost guards ───────────────────────────────────────────────────────
+// A handover-doc question is short; these bounds exist to cap accidental or
+// malicious oversized requests before they reach Bedrock (token cost) or the
+// retriever. They are deliberately generous so normal use never hits them.
+const MAX_MESSAGE_LENGTH = 8_000; // characters per chat message
+const MAX_SEARCH_RESULTS = 10; // upper bound for the searchDocs `maxResults` tool arg
+const DEFAULT_SEARCH_RESULTS = 5;
+
 // ─── Agent ───────────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You answer questions about a set of team handover documents, so colleagues can
 self-serve while the document owner is away.
@@ -141,7 +149,11 @@ function buildAgent(key: ModelKey) {
         }),
         needsApproval: false, // read-only retrieval
         handler: async ({ input }) => {
-          const results = await kb.retrieve(input.query, { maxResults: input.maxResults ?? 5 });
+          // Clamp to [1, MAX_SEARCH_RESULTS] so a model- or client-supplied value can't
+          // request an unbounded retrieval. Non-finite/absent values fall back to the default.
+          const requested = Number.isFinite(input.maxResults) ? (input.maxResults as number) : DEFAULT_SEARCH_RESULTS;
+          const maxResults = Math.min(MAX_SEARCH_RESULTS, Math.max(1, Math.floor(requested)));
+          const results = await kb.retrieve(input.query, { maxResults });
           // Map to a plain JSON shape (RetrieveResult is an interface, not a JSONValue)
           // and hand the model just what it needs to answer + cite the source.
           return results.map((r) => ({ text: r.text, source: r.source, score: r.score }));
@@ -260,6 +272,15 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
 
   async sendMessage(conversationId: string, message: string, channelId: string, model?: string) {
     const user = await auth.requireAuth(context);
+    // Validate the payload at the boundary, before any owned-conversation lookup or
+    // Bedrock call: reject empty and oversized messages so a single request can't run
+    // up an unbounded token bill.
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      throw new Error('Message cannot be empty');
+    }
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      throw new Error(`Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`);
+    }
     const { agent } = resolveAgent(model);
     await assertOwns(agent, user.username, conversationId);
     await agent.stream(message, { conversationId, channelId, userId: user.username });
@@ -274,8 +295,13 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
   },
 
   async getChannel(channelId: string, model?: string) {
-    await auth.requireAuth(context);
+    const user = await auth.requireAuth(context);
     const { agent } = resolveAgent(model);
+    // The Realtime channel id IS the conversation id (see src/App.tsx subscribe()),
+    // so a signed subscription token must be gated by conversation ownership — the
+    // same check the read/write/delete routes apply. Without this, any signed-in
+    // user who learns a conversation UUID could subscribe to its streamed replies.
+    await assertOwns(agent, user.username, channelId);
     return agent.getChannel(channelId);
   },
 

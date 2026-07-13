@@ -34,3 +34,6 @@ AGENTS.md
 # Only the sample doc is tracked so the app works out of the box.
 knowledge/*
 !knowledge/SAMPLE-handover.md
+
+# Personal video/demo planning — not for the public repo.
+docs/video-script.md
