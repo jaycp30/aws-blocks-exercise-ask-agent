@@ -654,9 +654,18 @@ npx cdk synth --context sandboxMode=true --output /tmp/cdk.out
 grep -c '"Deny"' /tmp/cdk.out/ask-aws-agent-stack-*.template.json   # includes the bedrock Deny
 ```
 
-Behavioral acceptance ("an unrelated model is denied") is a post-deploy check: after
-`npm run deploy`, confirm chat still works on all three models, then confirm an unrelated model
-(e.g. `anthropic.claude-3-haiku`) returns `AccessDenied`.
+Behavioral acceptance ("an unrelated model is denied") was validated post-deploy against the
+live `HandlerServiceRole` with the IAM policy simulator, cross-checked against the running app:
+
+- Sonnet foundation-model ARN → `allowed`, and the live app answers on Sonnet 4.6 end-to-end.
+- `anthropic.claude-3-haiku` → `explicitDeny`.
+
+Gotcha worth remembering: `aws iam simulate-principal-policy` mis-evaluates `NotResource` when
+you pass several `--resource-arns` in one call — it collapsed to `explicitDeny` for *every*
+resource, including the ones the allow-list excludes, which looked at first like the Deny had
+broken Sonnet. Simulating one resource per call gives the correct answer, and the running app is
+the real ground truth. Lesson: trust the live app over a simulator, and test `NotResource`
+policies one resource at a time.
 
 ## Appendix — commands used in this exercise
 
