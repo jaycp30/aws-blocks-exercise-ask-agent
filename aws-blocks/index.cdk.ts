@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { RemovalPolicies, Mixins } from 'aws-cdk-lib';
+import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 
 import { Hosting, BlocksStack, SandboxDisableDeletionProtection } from '@aws-blocks/blocks/cdk';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,36 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
   backendHandlerPath: join(__dirname, 'index.handler.ts'),
   backendCDKPath: join(__dirname, 'index.ts')
 });
+
+// ─── Least-privilege Bedrock (GitHub #5) ───────────────────────────────────────
+// bb-agent hardcodes a Bedrock grant on `arn:aws:bedrock:*::foundation-model/*`
+// (every model, every region) and exposes no prop to scope it. We can't remove that
+// Allow, but an explicit Deny always wins, so we deny InvokeModel on everything EXCEPT
+// the exact models this app uses. This shrinks the blast radius if the runtime or a
+// dependency is compromised, while leaving the role's non-Bedrock permissions untouched.
+//
+// Region is intentionally wildcarded: the jp.* / apac.* profiles are CROSS-REGION and
+// require invoke rights on their underlying model ARNs in whichever region they route
+// to, so pinning regions risks locking out production chat. Model IDs mirror MODELS in
+// aws-blocks/index.ts (+ Titan embed, used by kb.retrieve at query time) — keep in sync.
+const ALLOWED_BEDROCK_MODELS = [
+  // Sonnet 4.6 via the jp. cross-region inference profile
+  'arn:aws:bedrock:*:*:inference-profile/jp.anthropic.claude-sonnet-4-6*',
+  'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*',
+  // Nova Pro via the apac. cross-region inference profile
+  'arn:aws:bedrock:*:*:inference-profile/apac.amazon.nova-pro-v1*',
+  'arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1*',
+  // Nemotron Nano — on-demand foundation model
+  'arn:aws:bedrock:*::foundation-model/nvidia.nemotron-nano-3-30b*',
+  // Titan Text Embeddings V2 — query embedding for the knowledge base
+  'arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2*',
+];
+
+blocksStack.handler.addToRolePolicy(new PolicyStatement({
+  effect: Effect.DENY,
+  actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+  notResources: ALLOWED_BEDROCK_MODELS,
+}));
 
 if (sandboxMode) {
   // Make all resources deletable so sandbox:destroy can clean up the entire stack.
