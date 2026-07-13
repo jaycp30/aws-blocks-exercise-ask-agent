@@ -172,7 +172,12 @@ function buildAgent(key: ModelKey) {
           // structural half of the indirect-prompt-injection defense (the system prompt
           // is the other half). `source`/`score` stay outside the fence for citation.
           return results.map((r) => ({
-            source: r.source,
+            // Cite by filename only. On AWS `r.source` is the full `s3://bucket/key`
+            // URI; surfacing it leaks the internal bucket name into user-visible
+            // citations (an info-disclosure surfaced during injection testing — Nova
+            // printed the raw URI). Basename works for s3:// URIs, local paths, and
+            // bare filenames alike.
+            source: r.source.split('/').pop() || r.source,
             score: r.score,
             text: `<untrusted_document_passage>\n${r.text}\n</untrusted_document_passage>`,
           }));
